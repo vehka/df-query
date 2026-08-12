@@ -204,7 +204,7 @@ table.grid.compact td, table.grid.compact th { padding: 4px 8px; font-size: 13px
 
 /* ---------- cards ---------- */
 
-.card-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.card-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
 .card-grid.wide { grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); }
 
 .card {

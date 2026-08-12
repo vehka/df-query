@@ -338,6 +338,12 @@ local function dump_units(waves, work_detail_lookup)
         local record = {
             id = unit.id,
             name = u(dfhack.units.getReadableName(unit)),
+            -- What DF's own unit list shows: "Zas Kironol", no nickname or
+            -- profession tacked on. The full readable name stays in `name`.
+            short_name = try(function()
+                return u(dfhack.translation.translateName(
+                    dfhack.units.getVisibleName(unit), false))
+            end, ''),
             nickname = u(unit.name.nickname),
             profession = u(try(function() return dfhack.units.getProfessionName(unit) end, '')),
             race = u(try(function() return dfhack.units.getRaceReadableName(unit) end, '')),
@@ -411,7 +417,10 @@ end
 -- Stockpiles, workshops, and the links between them
 --------------------------------------------------------------------------
 
+--- Prefer whatever the player typed in over DF's generated "Stockpile #3".
 local function building_name(bld, fallback)
+    local custom = try(function() return u(bld.name) end, '')
+    if custom and custom ~= '' then return custom end
     local name = try(function() return u(dfhack.buildings.getName(bld)) end)
     if name and name ~= '' then return name end
     return fallback
@@ -596,16 +605,23 @@ local function squad_schedule(sq)
         for m = 0, 11 do
             local entry = routine.month[m]
             local orders = A{}
-            for _, order in ipairs(entry.orders) do
+            -- `entry.orders` holds squad_schedule_order wrappers; the actual
+            -- squad_order (and thus its type) hangs off `.order`.
+            for _, scheduled in ipairs(entry.orders) do
                 orders[#orders + 1] = {
-                    type = enum_name(df.squad_order_type, try(function() return order:getType() end)),
-                    min_count = try(function() return order.min_count end, 0),
+                    type = enum_name(df.squad_order_type,
+                        try(function() return scheduled.order:getType() end)),
+                    min_count = try(function() return scheduled.min_count end, 0),
                 }
             end
             months[#months + 1] = {
                 month = m,
                 name = MONTHS[m + 1],
-                uniform_mode = try(function() return entry.uniform_mode end, 0),
+                label = u(try(function() return entry.name end, '')),
+                sleep_mode = enum_name(df.squad_sleep_option_type,
+                    try(function() return entry.sleep_mode end)),
+                uniform_mode = enum_name(df.squad_civilian_uniform_type,
+                    try(function() return entry.uniform_mode end)),
                 orders = orders,
             }
         end

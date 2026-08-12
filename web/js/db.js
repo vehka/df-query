@@ -19,11 +19,42 @@ const CLASS_CATEGORY = {
   Normal: 'Other',
 };
 
+// A handful of skills are class `Normal` with no labour attached, so neither
+// signal places them. DF has no third grouping to read — the game's own UI
+// hardcodes these too — so they are named here rather than dumped into
+// "Other". Everything else is still derived from the snapshot's enum tables.
+const SKILL_CATEGORY_OVERRIDES = {
+  MINING: 'Mining',
+  MILITARY_TACTICS: 'Combat',
+  // Performing arts, alongside the Cultural (written) ones.
+  DANCE: 'Arts',
+  MAKE_MUSIC: 'Arts',
+  SING_MUSIC: 'Arts',
+  PLAY_KEYBOARD_INSTRUMENT: 'Arts',
+  PLAY_STRINGED_INSTRUMENT: 'Arts',
+  PLAY_WIND_INSTRUMENT: 'Arts',
+  PLAY_PERCUSSION_INSTRUMENT: 'Arts',
+  // The noble/bookkeeping skills.
+  APPRAISAL: 'Administration',
+  ORGANIZATION: 'Administration',
+  RECORD_KEEPING: 'Administration',
+  // Library research.
+  CRITICAL_THINKING: 'Scholarship',
+  LOGIC: 'Scholarship',
+  MATHEMATICS: 'Scholarship',
+  ASTRONOMY: 'Scholarship',
+  CHEMISTRY: 'Scholarship',
+  GEOGRAPHY: 'Scholarship',
+  OPTICS_ENGINEER: 'Scholarship',
+  FLUID_ENGINEER: 'Scholarship',
+};
+
 // Display order for the category cards; anything unlisted is appended.
 export const CATEGORY_ORDER = [
-  'Combat', 'Woodworking', 'Stoneworking', 'Metalsmithing', 'Jewelry',
-  'Crafts', 'Farming', 'Fishing', 'Hunting', 'Healthcare', 'Engineering',
-  'Arts', 'Social', 'Personal', 'Hauling', 'Other',
+  'Combat', 'Mining', 'Woodworking', 'Stoneworking', 'Metalsmithing',
+  'Jewelry', 'Crafts', 'Farming', 'Fishing', 'Hunting', 'Healthcare',
+  'Engineering', 'Arts', 'Scholarship', 'Administration', 'Social',
+  'Personal', 'Hauling', 'Other',
 ];
 
 export class Db {
@@ -49,6 +80,7 @@ export class Db {
     this.#categoriseSkills();
     this.#index();
     this.#annotateUnits();
+    this.#orderCategories();
   }
 
   #categoriseSkills() {
@@ -56,11 +88,22 @@ export class Db {
     for (const skill of this.skills.values()) {
       const labor = skill.labor && skill.labor !== 'NONE' ? this.labors.get(skill.labor) : null;
       const fromLabor = labor && labor.category && labor.category !== 'None' ? labor.category : null;
-      skill.category = fromLabor || CLASS_CATEGORY[skill.class] || 'Other';
+      skill.category = SKILL_CATEGORY_OVERRIDES[skill.key]
+        || fromLabor
+        || CLASS_CATEGORY[skill.class]
+        || 'Other';
       if (!this.categories.has(skill.category)) this.categories.set(skill.category, []);
       this.categories.get(skill.category).push(skill);
     }
-    this.categoryNames = [...this.categories.keys()].sort((a, b) => {
+  }
+
+  /** Order categories for display, dropping any nobody in this fort has. */
+  #orderCategories() {
+    const present = new Set();
+    for (const unit of this.units) {
+      for (const category of unit.best.keys()) present.add(category);
+    }
+    this.categoryNames = [...present].sort((a, b) => {
       const ai = CATEGORY_ORDER.indexOf(a);
       const bi = CATEGORY_ORDER.indexOf(b);
       return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi) || a.localeCompare(b);
@@ -75,6 +118,10 @@ export class Db {
       ...this.stockpiles.map((s) => [s.id, { ...s, node: 'stockpile' }]),
       ...this.workshops.map((w) => [w.id, { ...w, node: 'workshop' }]),
     ]);
+    // DF's stockpile category set, taken from whichever pile accepts the
+    // most — used to collapse "accepts everything" piles in the table.
+    this.stockpileCategoryCount = Math.max(
+      1, ...this.stockpiles.map((s) => asList(s.categories).length));
     this.waves = [...new Set(this.units.map((u) => u.wave && u.wave.label).filter(Boolean))]
       .sort((a, b) => {
         const ua = this.units.find((u) => u.wave && u.wave.label === a);
@@ -115,12 +162,18 @@ export class Db {
       unit.squad = unit.squad_id !== undefined && unit.squad_id !== null
         ? this.squadById.get(unit.squad_id)
         : null;
+
+      // Compact label for cards and rosters, where the full readable name
+      // (nickname + profession) would be truncated to uselessness.
+      unit.label = unit.nickname || unit.short_name || unit.name;
     }
   }
 
   ratingName(rating) {
     const entry = this.ratings[rating];
-    return entry ? entry.caption : `level ${rating}`;
+    if (entry) return entry.caption;
+    // DF's enum stops at Legendary+5, but skills keep climbing past it.
+    return rating > 15 ? `Legendary+${rating - 15}` : `level ${rating}`;
   }
 
   /** Skill entries for a unit, grouped into the display categories. */

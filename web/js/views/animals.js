@@ -99,6 +99,7 @@ function byPasture(db, animals) {
         ? h('p', { class: 'muted mono' }, formatBox(zone), ` · ${zone.area} tiles`,
           grazers ? ` · ${(zone.area / grazers).toFixed(1)} tiles/grazer` : '')
         : h('p', { class: 'muted' }, 'Roaming free — no pen or pasture assignment.'),
+      members.length ? h('p', {}, speciesChips(members)) : null,
       members.length
         ? h('table', { class: 'grid compact' },
           h('thead', {}, h('tr', {},
@@ -113,6 +114,14 @@ function byPasture(db, animals) {
               h('td', { class: 'muted mono' }, formatPos(a.pos))))))
         : h('p', { class: 'empty' }, 'No animals assigned.'));
   }));
+}
+
+function speciesChips(members) {
+  const counts = new Map();
+  for (const animal of members) counts.set(animal.race, (counts.get(animal.race) || 0) + 1);
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([race, count]) => h('span', { class: 'chip' }, `${race} ${count}`));
 }
 
 function bySpecies(animals) {

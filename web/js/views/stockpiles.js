@@ -102,11 +102,20 @@ function stockpileTable(db, piles, redraw) {
         h('td', {}, sp.name),
         h('td', { class: 'muted mono' }, formatBox(sp)),
         h('td', {}, sp.area),
-        h('td', {}, asList(sp.categories).map((c) => h('span', { class: 'chip' }, c))),
+        h('td', {}, acceptChips(db, sp)),
         h('td', {}, sp.item_count),
         h('td', { class: inbound.length ? '' : 'muted' }, inbound.length),
         h('td', { class: outbound.length ? '' : 'muted' }, outbound.length));
     })));
+}
+
+/** Collapse the "accepts one of everything" piles to a single chip. */
+function acceptChips(db, sp) {
+  const categories = asList(sp.categories);
+  if (categories.length >= db.stockpileCategoryCount) {
+    return h('span', { class: 'chip' }, 'everything');
+  }
+  return categories.map((c) => h('span', { class: 'chip' }, c));
 }
 
 function nodeDetail(db, node, redraw) {

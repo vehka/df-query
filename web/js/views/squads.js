@@ -61,7 +61,8 @@ function squadCard(db, squad) {
           const unit = db.unitById.get(pos.unit_id);
           return h('tr', {},
             h('td', { class: 'muted' }, pos.index),
-            h('td', {}, unit ? unit.name : pos.name || `hf ${pos.occupant_hf}`),
+            h('td', { title: unit ? unit.name : '' },
+              unit ? unit.label : pos.name || `hf ${pos.occupant_hf}`),
             h('td', {}, unit ? combatChips(db, unit) : h('span', { class: 'muted' }, '—')),
             h('td', { class: 'muted' }, unit && unit.job ? unit.job.name : 'no job'));
         })))

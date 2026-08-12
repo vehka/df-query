@@ -110,8 +110,8 @@ function highlights(db, units, select) {
         ` ${units.filter((u) => u.best.has(category)).length}`)),
       h('ol', { class: 'ranked' }, ranked.map((unit) => {
         const best = unit.best.get(category);
-        return h('li', { onclick: () => select(unit) },
-          h('span', { class: 'rank-name' }, unit.name),
+        return h('li', { onclick: () => select(unit), title: unit.name },
+          h('span', { class: 'rank-name' }, unit.label),
           h('span', { class: `rank-skill lvl-${Math.min(best.rating, 15)}` },
             `${best.def.caption} · ${db.ratingName(best.rating)}`));
       })));
@@ -155,6 +155,11 @@ function roster(db, units, select) {
         String(unit.stress_category)))))));
 }
 
+function nobleSuffix(unit) {
+  const extra = unit.nobles.filter((n) => n.toLowerCase() !== unit.profession.toLowerCase());
+  return extra.length ? ` · ${extra.join(', ')}` : '';
+}
+
 function idleLabel(unit) {
   if (unit.idleSamples > 1) return `${pct(unit.idleRate)} (${unit.idleSamples})`;
   return unit.idle ? 'idle' : 'working';
@@ -170,7 +175,8 @@ function unitDetail(db, unit, redraw) {
       h('button', { class: 'ghost', onclick: () => { state.selectedUnitId = null; redraw(); } }, '✕')),
     h('p', { class: 'muted' },
       `${unit.profession} · ${Math.floor(unit.age)} years · ${unit.sex}`,
-      unit.nobles.length ? ` · ${unit.nobles.join(', ')}` : '',
+      // DF often makes a noble's title their profession too — don't say it twice.
+      nobleSuffix(unit),
       unit.squad ? ` · ${unit.squad.display_name}` : ''),
     h('p', {},
       h('strong', {}, 'Now: '),
