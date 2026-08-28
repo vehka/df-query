@@ -40,15 +40,22 @@ export function plural(count, one, many = `${one}s`) {
   return `${count} ${count === 1 ? one : many}`;
 }
 
-/** DF coordinates, in the order the game's cursor readout uses. */
-export function formatPos(pos) {
-  if (!pos) return '—';
-  return `${pos.x}, ${pos.y}, z${pos.z}`;
+// The vertical half of a coordinate is DF's elevation, which only `db`
+// knows how to compute -- hence the argument. Without one these fall back
+// to the raw z index, which is what an old snapshot can offer anyway.
+function level(z, db) {
+  return db ? db.elevLabel(z) : `z${z}`;
 }
 
-export function formatBox(b) {
-  if (b.x1 === b.x2 && b.y1 === b.y2) return `${b.x1}, ${b.y1}, z${b.z}`;
-  return `${b.x1},${b.y1}–${b.x2},${b.y2} z${b.z}`;
+/** DF coordinates, in the order the game's cursor readout uses. */
+export function formatPos(pos, db) {
+  if (!pos) return '—';
+  return `${pos.x}, ${pos.y}, ${level(pos.z, db)}`;
+}
+
+export function formatBox(b, db) {
+  if (b.x1 === b.x2 && b.y1 === b.y2) return `${b.x1}, ${b.y1}, ${level(b.z, db)}`;
+  return `${b.x1},${b.y1}–${b.x2},${b.y2} ${level(b.z, db)}`;
 }
 
 export function debounce(fn, ms = 150) {

@@ -96,7 +96,7 @@ function byPasture(db, animals) {
       h('h3', {}, name,
         zone && !zone.active ? h('span', { class: 'badge warn' }, 'inactive') : null),
       zone
-        ? h('p', { class: 'muted mono' }, formatBox(zone), ` · ${zone.area} tiles`,
+        ? h('p', { class: 'muted mono' }, formatBox(zone, db), ` · ${zone.area} tiles`,
           grazers ? ` · ${(zone.area / grazers).toFixed(1)} tiles/grazer` : '')
         : h('p', { class: 'muted' }, 'Roaming free — no pen or pasture assignment.'),
       members.length ? h('p', {}, speciesChips(members)) : null,
@@ -111,7 +111,7 @@ function byPasture(db, animals) {
               h('td', {}, a.sex === 'male' ? '♂' : a.sex === 'female' ? '♀' : '—'),
               h('td', {}, `${Math.floor(a.age)}${a.adult ? '' : ' (young)'}`),
               h('td', {}, traits(a)),
-              h('td', { class: 'muted mono' }, formatPos(a.pos))))))
+              h('td', { class: 'muted mono' }, formatPos(a.pos, db))))))
         : h('p', { class: 'empty' }, 'No animals assigned.'));
   }));
 }

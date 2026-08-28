@@ -4,14 +4,22 @@ import { h, clear } from './util.js';
 import { Db } from './db.js';
 import * as skills from './views/skills.js';
 import * as stockpiles from './views/stockpiles.js';
+import * as flow from './views/flow.js';
 import * as animals from './views/animals.js';
+import * as equipment from './views/equipment.js';
 import * as squads from './views/squads.js';
+import * as visitors from './views/visitors.js';
+import * as instruments from './views/instruments.js';
 
 const VIEWS = [
   { id: 'skills', label: 'Skills', module: skills },
   { id: 'stockpiles', label: 'Stockpiles', module: stockpiles },
+  { id: 'flow', label: 'Flow', module: flow },
   { id: 'animals', label: 'Animals', module: animals },
   { id: 'squads', label: 'Squads', module: squads },
+  { id: 'equipment', label: 'Equipment', module: equipment },
+  { id: 'visitors', label: 'Visitors', module: visitors },
+  { id: 'instruments', label: 'Instruments', module: instruments },
 ];
 
 const el = {

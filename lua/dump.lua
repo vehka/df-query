@@ -199,7 +199,61 @@ local function dump_enums()
         end
     end
 
-    return {job_skill = skills, unit_labor = labors, skill_rating = ratings}
+    -- Item captions, so the flow view can say "stones" rather than BOULDER
+    -- without keeping its own copy of DF's item list.
+    local items = A{}
+    for i = 0, df.item_type._last_item do
+        local key = df.item_type[i]
+        if key then
+            items[#items + 1] = {
+                id = i,
+                key = key,
+                caption = u(try(function() return df.item_type.attrs[i].caption end, '')),
+            }
+        end
+    end
+
+    -- Quality captions, so the equipment view can print DF's own stars
+    -- rather than inventing its own word for a masterwork.
+    local qualities = A{}
+    for i = 0, df.item_quality._last_item do
+        local key = df.item_quality[i]
+        if key then
+            qualities[#qualities + 1] = {
+                id = i,
+                key = key,
+                caption = u(try(function() return df.item_quality.attrs[i].caption end, key)),
+            }
+        end
+    end
+
+    -- Building captions, so a recipe can say "Craftsdwarf's Workshop"
+    -- rather than `Craftsdwarfs`. Two enums, because DF reads a building's
+    -- subtype against a different one per class.
+    local function building_captions(enum)
+        local out = A{}
+        for i = 0, enum._last_item do
+            local key = enum[i]
+            if key then
+                out[#out + 1] = {
+                    id = i,
+                    key = key,
+                    caption = u(try(function() return enum.attrs[i].name end, key)),
+                }
+            end
+        end
+        return out
+    end
+
+    return {
+        job_skill = skills,
+        unit_labor = labors,
+        skill_rating = ratings,
+        item_type = items,
+        item_quality = qualities,
+        workshop_type = building_captions(df.workshop_type),
+        furnace_type = building_captions(df.furnace_type),
+    }
 end
 
 --------------------------------------------------------------------------
@@ -426,21 +480,95 @@ local function building_name(bld, fallback)
     return fallback
 end
 
+--- Pack a map tile into one integer key. Map edges are well under 65536.
+local function tile_key(x, y)
+    return x * 65536 + y
+end
+
+--- Every stockpile tile, mapped to the pile that owns it, plus each pile's
+--- true tile count.
+---
+--- A pile is painted, not rectangular, so its bounding box overstates it --
+--- the box is what `area` used to report. Walking the box once per pile
+--- costs a few thousand `containsTile` calls; the alternative, asking each
+--- of tens of thousands of items which pile it is in, is the expensive
+--- direction.
+local function stockpile_tile_map()
+    local map, tiles = {}, {}
+    for _, sp in ipairs(df.global.world.buildings.other.STOCKPILE) do
+        local plane = map[sp.z]
+        if not plane then
+            plane = {}
+            map[sp.z] = plane
+        end
+        local count = 0
+        for x = sp.x1, sp.x2 do
+            for y = sp.y1, sp.y2 do
+                -- Falling back to `true` keeps a pile rectangular rather than
+                -- empty if the extents ever move.
+                if try(function() return dfhack.buildings.containsTile(sp, x, y) end, true) then
+                    plane[tile_key(x, y)] = sp.id
+                    count = count + 1
+                end
+            end
+        end
+        tiles[sp.id] = count
+    end
+    return map, tiles
+end
+
 local function stockpile_contents(sp)
     local by_type, total = {}, 0
+    local occupied, used_tiles = {}, 0
     local items = try(function() return dfhack.buildings.getStockpileContents(sp) end, {})
     for _, item in ipairs(items) do
         local key = enum_name(df.item_type, item:getType()) or 'UNKNOWN'
         by_type[key] = (by_type[key] or 0) + 1
         total = total + 1
+        -- Only the top layer sits on a tile: a barrel's contents are
+        -- `in_inventory` and share the barrel's square, which is exactly the
+        -- occupancy DF itself cares about when deciding a pile is full.
+        if try(function() return item.flags.on_ground end, false) then
+            local k = tile_key(item.pos.x, item.pos.y)
+            if not occupied[k] then
+                occupied[k] = true
+                used_tiles = used_tiles + 1
+            end
+        end
     end
-    return by_type, total
+    return by_type, total, used_tiles
 end
 
-local function dump_stockpiles()
+--- Containers the pile asks for against containers it actually has. A food
+--- pile set to 20 barrels with 2 on site stores almost nothing, and nothing
+--- else in the snapshot would show it.
+local function stockpile_containers(sp)
+    local storage = try(function() return sp.storage end)
+    if not storage then return nil end
+    local have = {}
+    for _, kind in ipairs(try(function() return storage.container_type end, {})) do
+        local key = enum_name(df.item_type, kind) or 'UNKNOWN'
+        have[key] = (have[key] or 0) + 1
+    end
+    -- DF counts wheelbarrows and bins/barrels in separate wanted-slots but
+    -- pools the actual containers in one list, so match on item type.
+    local bins = (have.BIN or 0)
+    local barrels = (have.BARREL or 0) + (have.BUCKET or 0)
+    local carts = (have.WHEELBARROW or 0)
+    return {
+        barrels_wanted = try(function() return storage.max_barrels end, 0),
+        barrels_held = barrels,
+        bins_wanted = try(function() return storage.max_bins end, 0),
+        bins_held = bins,
+        wheelbarrows_wanted = try(function() return storage.max_wheelbarrows end, 0),
+        wheelbarrows_held = carts,
+    }
+end
+
+local function dump_stockpiles(tiles, incoming)
     local out = A{}
     for _, sp in ipairs(df.global.world.buildings.other.STOCKPILE) do
-        local by_type, total = stockpile_contents(sp)
+        local by_type, total, used = stockpile_contents(sp)
         local width = sp.x2 - sp.x1 + 1
         local height = sp.y2 - sp.y1 + 1
         out[#out + 1] = {
@@ -449,9 +577,13 @@ local function dump_stockpiles()
             name = building_name(sp, ('Stockpile %d'):format(sp.stockpile_number)),
             custom_name = u(sp.name),
             x1 = sp.x1, y1 = sp.y1, x2 = sp.x2, y2 = sp.y2, z = sp.z,
-            area = width * height,
+            area = tiles[sp.id] or (width * height),
+            box_area = width * height,
+            used_tiles = used,
             categories = set_flags(sp.settings.flags),
             flags = set_flags(sp.stockpile_flag),
+            containers = stockpile_containers(sp),
+            incoming_jobs = incoming[sp.id] or 0,
             item_count = total,
             items_by_type = by_type,
         }
@@ -477,9 +609,31 @@ local function dump_workshops()
             for _, uid in ipairs(try(function() return bld.profile.permitted_workers end, {})) do
                 workers[#workers + 1] = uid
             end
+            -- `PERM` items are the workshop's own construction materials.
+            -- Anything else parked here is input waiting or output nobody has
+            -- hauled away -- the latter is what stalls a workshop. Which it
+            -- is shows in the mix: a butcher holding a thousand body parts is
+            -- a refuse problem, not a finished-goods one, so record the
+            -- dominant type rather than just the total.
+            local held, held_by_type = 0, {}
+            for _, entry in ipairs(try(function() return bld.contained_items end, {})) do
+                if try(function() return entry.use_mode end) ~= df.building_item_role_type.PERM then
+                    held = held + 1
+                    local key = enum_name(df.item_type,
+                        try(function() return entry.item:getType() end)) or 'UNKNOWN'
+                    held_by_type[key] = (held_by_type[key] or 0) + 1
+                end
+            end
+            local top_type, top_count = nil, 0
+            for key, count in pairs(held_by_type) do
+                if count > top_count then top_type, top_count = key, count end
+            end
             out[#out + 1] = {
                 id = bld.id,
                 kind = btype,
+                held_items = held,
+                held_top_type = top_type,
+                held_top_count = top_count,
                 -- `bld.type` is a different enum per building class.
                 subtype = enum_name(
                     btype == 'Furnace' and df.furnace_type or df.workshop_type,
@@ -526,6 +680,173 @@ local function dump_links()
         end
     end
     return out
+end
+
+--------------------------------------------------------------------------
+-- Goods flow
+--
+-- Why is a thing lying on the floor instead of in a pile? DF exposes no
+-- "would pile X accept item Y" predicate -- answering that properly means
+-- reimplementing the stockpile settings screen against every item subtype
+-- and material -- so this section reports observable facts and leaves the
+-- inference to the viewer: what is loose and where, how much of it a dwarf
+-- is already on their way to fetch, and what DF's own hauling queue holds.
+--------------------------------------------------------------------------
+
+--- Is this item loose cargo? The excluded flags all mean the item is
+--- somewhere on purpose: built into a construction or a building, inside a
+--- container or a creature, encased in ice, or a visitor's property.
+local function is_loose(flags)
+    return flags.on_ground
+        and not (flags.removed or flags.garbage_collect or flags.in_building
+            or flags.in_inventory or flags.construction or flags.spider_web
+            or flags.encased or flags.hostile or flags.trader)
+end
+
+-- A type spread over more levels than this is scattered everywhere; the
+-- tail adds noise, not information.
+local LOOSE_LEVEL_CAP = 24
+
+--- Items on the floor outside every stockpile, grouped by type and level.
+local function dump_loose(tile_map)
+    local by_type = {}
+    local totals = {items = 0, claimed = 0, forbidden = 0, rotten = 0, dump = 0}
+
+    for _, item in ipairs(df.global.world.items.all) do
+        local flags = item.flags
+        if is_loose(flags) then
+            -- `item.pos` only tracks the last position the item was on the
+            -- ground -- which is where it is, given the filter above. Reading
+            -- the field beats a getPosition() call per item across a world
+            -- list tens of thousands of entries long.
+            local pos = item.pos
+            local plane = tile_map[pos.z]
+            if not (plane and plane[tile_key(pos.x, pos.y)]) then
+                local key = enum_name(df.item_type, item:getType()) or 'UNKNOWN'
+                local entry = by_type[key]
+                if not entry then
+                    entry = {
+                        type = key, count = 0, claimed = 0,
+                        forbidden = 0, rotten = 0, dump = 0, levels = {},
+                    }
+                    by_type[key] = entry
+                end
+                local level = entry.levels[pos.z]
+                if not level then
+                    level = {z = pos.z, count = 0,
+                             x1 = pos.x, x2 = pos.x, y1 = pos.y, y2 = pos.y}
+                    entry.levels[pos.z] = level
+                end
+                level.count = level.count + 1
+                if pos.x < level.x1 then level.x1 = pos.x end
+                if pos.x > level.x2 then level.x2 = pos.x end
+                if pos.y < level.y1 then level.y1 = pos.y end
+                if pos.y > level.y2 then level.y2 = pos.y end
+
+                entry.count = entry.count + 1
+                totals.items = totals.items + 1
+                -- `in_job` means someone is already coming for it. Counting
+                -- it separately is the difference between a backlog being
+                -- worked and a backlog nobody has picked up.
+                if flags.in_job then
+                    entry.claimed = entry.claimed + 1
+                    totals.claimed = totals.claimed + 1
+                end
+                if flags.forbid then
+                    entry.forbidden = entry.forbidden + 1
+                    totals.forbidden = totals.forbidden + 1
+                end
+                if flags.rotten then
+                    entry.rotten = entry.rotten + 1
+                    totals.rotten = totals.rotten + 1
+                end
+                if flags.dump then
+                    entry.dump = entry.dump + 1
+                    totals.dump = totals.dump + 1
+                end
+            end
+        end
+    end
+
+    local types = A{}
+    for _, entry in pairs(by_type) do
+        local levels = A{}
+        for _, level in pairs(entry.levels) do levels[#levels + 1] = level end
+        table.sort(levels, function(a, b) return a.count > b.count end)
+        while #levels > LOOSE_LEVEL_CAP do table.remove(levels) end
+        entry.levels = levels
+        types[#types + 1] = entry
+    end
+    table.sort(types, function(a, b) return a.count > b.count end)
+
+    return {
+        total = totals.items,
+        claimed = totals.claimed,
+        forbidden = totals.forbidden,
+        rotten = totals.rotten,
+        marked_dump = totals.dump,
+        by_type = types,
+    }
+end
+
+-- df-structures marks `hauler_type` "not an actual enum" and its `name`
+-- attributes are shifted against the `original-name` ones at indices 3 and 4,
+-- where it reads Item/Bin instead of Burial/Item. The original names line up
+-- with DF's own hauling labors, and a live fort agrees: lane 4 carries the
+-- bulk of the queue, which is Item Hauling, not bins. Ten entries, checked
+-- against Shieldclosed -- correcting them here beats shipping wrong labels.
+local HAULER_LABELS = {
+    [0] = 'Any', 'Stone', 'Wood', 'Burial', 'Item',
+    'Body', 'Food', 'Refuse', 'Furniture', 'Animals',
+}
+
+--- DF's own hauling counters: pending storage jobs and assigned haulers per
+--- hauling class, the same pair its Labors screen shows.
+local function dump_hauling()
+    local out = A{}
+    local storage = try(function() return df.global.world.stockpile end)
+    if not storage then return out end
+    for index = 0, 9 do
+        local jobs = try(function() return storage.num_jobs[index] end)
+        local haulers = try(function() return storage.num_haulers[index] end)
+        if jobs == nil and haulers == nil then break end
+        out[#out + 1] = {
+            index = index,
+            key = HAULER_LABELS[index] or tostring(index),
+            -- Kept so a future df-structures fix is visible without a redump.
+            raw_key = enum_name(df.hauler_type, index) or tostring(index),
+            jobs = jobs or 0,
+            haulers = haulers or 0,
+        }
+    end
+    return out
+end
+
+--- Pending "put this away" jobs, counted per destination building. The job
+--- kinds are matched on their enum name rather than a hardcoded list, so a
+--- new Store* job in a later DF version is picked up for free.
+local function dump_store_jobs()
+    local per_building, total, unclaimed = {}, 0, 0
+    local link = try(function() return df.global.world.jobs.list.next end)
+    while link do
+        local job = try(function() return link.item end)
+        if job then
+            local kind = enum_name(df.job_type, try(function() return job.job_type end)) or ''
+            if kind:sub(1, 5) == 'Store' then
+                total = total + 1
+                if not try(function() return dfhack.job.getWorker(job) end) then
+                    unclaimed = unclaimed + 1
+                end
+                local id = try(function()
+                    return dfhack.job.getGeneralRef(
+                        job, df.general_ref_type.BUILDING_DESTINATION).building_id
+                end)
+                if id then per_building[id] = (per_building[id] or 0) + 1 end
+            end
+        end
+        link = try(function() return link.next end)
+    end
+    return per_building, total, unclaimed
 end
 
 --------------------------------------------------------------------------
@@ -595,6 +916,299 @@ local function dump_animals(zone_of_unit)
 end
 
 --------------------------------------------------------------------------
+-- Equipment
+--
+-- Everything the squad-equipment analyser needs: what each soldier is
+-- actually wearing, what DF's uniform asks for, and what spare gear the
+-- fort has lying about to fix the gaps with.
+--------------------------------------------------------------------------
+
+-- Item types that can be part of a military kit. Ammo is handled through
+-- the quiver rather than listed as a slot.
+local EQUIPMENT_TYPES = {
+    ARMOR = 'body', HELM = 'head', GLOVES = 'hands', SHOES = 'feet',
+    PANTS = 'legs', SHIELD = 'shield', WEAPON = 'weapon', QUIVER = 'quiver',
+}
+
+-- Slots that come in pairs. DF issues a left and a right, and a soldier
+-- with one gauntlet has a gap that a naive per-slot count would miss.
+local PAIRED_SLOTS = {hands = true, feet = true}
+
+-- Where the subtype definitions live in the raws, per item type. A uniform
+-- spec names its piece by subtype id against these lists; -1 means "any of
+-- this kind", which is how DF stores "any helm" rather than an error.
+local ITEMDEF_LISTS = {
+    ARMOR = 'armor', HELM = 'helms', GLOVES = 'gloves', SHOES = 'shoes',
+    PANTS = 'pants', SHIELD = 'shields', WEAPON = 'weapons', AMMO = 'ammo',
+}
+
+local function subtype_def(kind, id)
+    local list = ITEMDEF_LISTS[kind or '']
+    if not list or not id or id < 0 then return nil end
+    return try(function() return df.global.world.raws.itemdefs[list][id] end)
+end
+
+--- How good is this material, as armour?
+---
+--- Rather than shipping a table of metal names, this reads DF's own
+--- `strength.fracture[SHEAR]` off the material. Sorting by it reproduces
+--- the received wisdom exactly -- adamantine, steel, iron, bronze, copper,
+--- bone, leather -- and it gets divine metals and mods right for free.
+--- Pig iron lands below copper and is not flagged ITEMS_ARMOR, which is
+--- why nobody makes armour out of it.
+local function material_grade(item)
+    local mi = try(function() return dfhack.matinfo.decode(item) end)
+    local mat = mi and mi.material
+    if not mat then return nil end
+    local flags = mat.flags
+    local class = 'other'
+    if flags.IS_METAL then class = 'metal'
+    elseif flags.BONE then class = 'bone'
+    elseif flags.SHELL then class = 'shell'
+    elseif flags.LEATHER then class = 'leather'
+    elseif flags.WOOD then class = 'wood'
+    elseif flags.SILK or flags.YARN or flags.THREAD_PLANT then class = 'cloth'
+    end
+    return {
+        material = u(try(function() return mi:toString() end, '')),
+        mat_class = class,
+        -- Resistance to a cutting blow, DF's own number. The single figure
+        -- that orders armour materials the way players rank them.
+        grade = try(function() return mat.strength.fracture[df.strain_type.SHEAR] end, 0),
+        armor_material = try(function() return flags.ITEMS_ARMOR end, false),
+    }
+end
+
+--- One wearable item, flattened for the snapshot.
+local function equipment_item(item, mode)
+    local subtype = try(function() return item.subtype end)
+    local record = {
+        id = try(function() return item.id end),
+        type = enum_name(df.item_type, try(function() return item:getType() end)),
+        subtype = u(try(function() return subtype.name end, '')),
+        -- 0 is clothing, 1+ is armour. The one field that separates a
+        -- leather dress from a mail shirt without parsing names.
+        armor_level = try(function() return subtype.armorlevel end),
+        quality = try(function() return item:getQuality() end, 0),
+        wear = try(function() return item.wear end, 0),
+        mode = enum_name(df.inv_item_role_type, mode),
+    }
+    record.slot = EQUIPMENT_TYPES[record.type or '']
+    local grade = material_grade(item)
+    if grade then
+        record.material = grade.material
+        record.mat_class = grade.mat_class
+        record.grade = grade.grade
+        record.armor_material = grade.armor_material
+    end
+    return record
+end
+
+--- What a soldier is carrying, plus the bolts in their quiver.
+local function unit_equipment(unit)
+    local items, ammo = A{}, 0
+    for _, entry in ipairs(try(function() return unit.inventory end, {})) do
+        local item = try(function() return entry.item end)
+        if item then
+            local kind = enum_name(df.item_type, try(function() return item:getType() end))
+            if EQUIPMENT_TYPES[kind or ''] then
+                items[#items + 1] = equipment_item(item, entry.mode)
+            end
+            -- Bolts live inside the quiver, not directly on the unit, so a
+            -- scan of `inventory` alone reports every archer as out of ammo.
+            if kind == 'QUIVER' then
+                for _, held in ipairs(try(function()
+                    return dfhack.items.getContainedItems(item)
+                end, {})) do
+                    if enum_name(df.item_type, try(function() return held:getType() end)) == 'AMMO' then
+                        ammo = ammo + try(function() return held.stack_size end, 1)
+                    end
+                end
+            end
+        end
+    end
+    return items, ammo
+end
+
+--- The uniform DF has been told to issue: one entry per slot it names.
+---
+--- Three things make this the standard worth grading against, rather than
+--- a hardcoded ideal kit:
+---
+---   * `material_class` is DF's own `entity_material_category`, and its
+---     values are specific: `Armor` is ARMOR_METAL -- the player asked for
+---     metal -- while `Leather` and `Cloth` name exactly what they say.
+---     Only `None` means "any material".
+---   * `item_subtype` indexes the raws, so a spec resolves to "mail shirt"
+---     or "high boot" by name; -1 is "any piece of this kind".
+---   * `assigned` is what DF has earmarked, which runs well ahead of what
+---     the soldier has picked up -- an off-duty squad has a full set of
+---     assignments and wears civilian clothes. Dumping the earmarked items
+---     themselves is what lets the UI tell "nothing exists" apart from
+---     "exists, not collected yet".
+local function position_uniform(pos, unit)
+    local out = A{}
+    local equipment = try(function() return pos.equipment end)
+    if not equipment then return out, 0 end
+    local assigned = 0
+    for ci, specs in ipairs(equipment.uniform) do
+        local category = enum_name(df.uniform_category, ci)
+        for _, spec in ipairs(specs) do
+            local kind = enum_name(df.item_type, try(function() return spec.item_type end))
+            local subtype_id = try(function() return spec.item_subtype end, -1)
+            local def = subtype_def(kind, subtype_id)
+            local count = #try(function() return spec.assigned end, {})
+            assigned = assigned + count
+            -- The earmarked items, with the one fact the uniform itself
+            -- cannot say: whether the soldier is actually carrying it.
+            local items = A{}
+            for _, item_id in ipairs(try(function() return spec.assigned end, {})) do
+                local item = try(function() return df.item.find(item_id) end)
+                if item then
+                    local record = equipment_item(item, nil)
+                    record.mode = nil
+                    record.carried = unit ~= nil and try(function()
+                        return dfhack.items.getHolderUnit(item) == unit
+                    end, false)
+                    items[#items + 1] = record
+                end
+            end
+            local entry = {
+                category = category,
+                slot = EQUIPMENT_TYPES[kind or ''],
+                type = kind,
+                subtype = def and u(try(function() return def.name end, '')) or nil,
+                -- The layering level of the *wanted* piece: 2 for a mail
+                -- shirt, 1 for leather armour, 0 for a cap. Says which of
+                -- two body specs is the armour and which is the layer.
+                armor_level = def and try(function() return def.armorlevel end) or nil,
+                material_class = enum_name(df.entity_material_category,
+                    try(function() return spec.material_class end)),
+                assigned = count,
+                assigned_items = items,
+            }
+            -- A spec can also name one exact material ("steel breastplate").
+            local mattype = try(function() return spec.mattype end, -1)
+            if mattype and mattype >= 0 then
+                entry.material = u(try(function()
+                    return dfhack.matinfo.decode(mattype, spec.matindex):toString()
+                end, ''))
+            end
+            out[#out + 1] = entry
+        end
+    end
+    return out, assigned
+end
+
+--- Metal bars on hand, by metal. The direct answer to "can I forge the
+--- replacements?" -- a gap the fort has the steel for reads very
+--- differently from one it does not.
+local function dump_metal_bars()
+    local tally, order = {}, A{}
+    for _, item in ipairs(try(function()
+        return df.global.world.items.other.BAR
+    end, {})) do
+        local flags = item.flags
+        if not try(function()
+            return flags.forbid or flags.trader or flags.encased or flags.removed
+        end, false) then
+            local grade = material_grade(item)
+            if grade and grade.mat_class == 'metal' then
+                local row = tally[grade.material]
+                if not row then
+                    row = {
+                        material = grade.material,
+                        grade = grade.grade,
+                        armor_material = grade.armor_material,
+                        count = 0,
+                    }
+                    tally[grade.material] = row
+                    order[#order + 1] = row
+                end
+                row.count = row.count + try(function() return item.stack_size end, 1)
+            end
+        end
+    end
+    table.sort(order, function(a, b) return (a.grade or 0) > (b.grade or 0) end)
+    return order
+end
+
+--- Spare gear: equipment nobody is wearing, grouped by what it is and what
+--- it is made of, with the pile it is sitting in.
+---
+--- `in_inventory` covers both worn kit and a hauler mid-carry; everything
+--- else in the exclusion list means the item is somewhere on purpose or is
+--- not really available (a construction, a trader's goods, an artifact
+--- nobody will melt down for a recruit).
+local function dump_armory(tile_map)
+    local groups, order = {}, A{}
+    local total, free = 0, 0
+    for _, item in ipairs(try(function()
+        return df.global.world.items.other.IN_PLAY
+    end, {})) do
+        local kind = enum_name(df.item_type, try(function() return item:getType() end))
+        if EQUIPMENT_TYPES[kind or ''] then
+            total = total + 1
+            local flags = item.flags
+            local held = try(function()
+                return flags.in_inventory or flags.construction or flags.artifact
+                    or flags.trader or flags.forbid or flags.dump or flags.encased
+                    or flags.removed or flags.garbage_collect
+            end, false)
+            if not held then
+                free = free + 1
+                local record = equipment_item(item, nil)
+                record.mode = nil
+                local key = table.concat({
+                    record.type or '?', record.subtype or '?', record.material or '?',
+                }, '\1')
+                local group = groups[key]
+                if not group then
+                    group = {
+                        type = record.type, subtype = record.subtype,
+                        slot = record.slot, armor_level = record.armor_level,
+                        material = record.material, mat_class = record.mat_class,
+                        grade = record.grade, armor_material = record.armor_material,
+                        count = 0, best_quality = 0, worn = 0,
+                        claimed = 0, stockpiles = A{},
+                    }
+                    groups[key] = group
+                    order[#order + 1] = group
+                end
+                group.count = group.count + 1
+                if (record.quality or 0) > group.best_quality then
+                    group.best_quality = record.quality
+                end
+                if (record.wear or 0) > 0 then group.worn = group.worn + 1 end
+                -- Owned by a civilian or already spoken for by a job: still
+                -- in the fort, but not free to hand to a soldier.
+                if try(function() return flags.owned or flags.in_job end, false) then
+                    group.claimed = group.claimed + 1
+                end
+                -- Which pile is it in? Reuses the stockpile tile map the
+                -- flow dumper already built.
+                if try(function() return flags.on_ground end, false) then
+                    local plane = tile_map[item.pos.z]
+                    local sp = plane and plane[tile_key(item.pos.x, item.pos.y)]
+                    if sp then
+                        local seen = false
+                        for _, id in ipairs(group.stockpiles) do
+                            if id == sp then seen = true break end
+                        end
+                        if not seen then group.stockpiles[#group.stockpiles + 1] = sp end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(order, function(a, b)
+        if a.count ~= b.count then return a.count > b.count end
+        return (a.grade or 0) > (b.grade or 0)
+    end)
+    return {total = total, free = free, groups = order, bars = dump_metal_bars()}
+end
+
+--------------------------------------------------------------------------
 -- Squads
 --------------------------------------------------------------------------
 
@@ -641,15 +1255,25 @@ local function dump_squads()
             local positions = A{}
             for pi, pos in ipairs(sq.positions) do
                 local entry = {index = pi, occupant_hf = pos.occupant}
+                -- The occupant is resolved first: the uniform dump needs it
+                -- to tell an earmarked item the soldier is carrying from one
+                -- still sitting in a stockpile.
+                local hf, unit
                 if pos.occupant >= 0 then
-                    local hf = df.historical_figure.find(pos.occupant)
-                    local unit = hf and hf.unit_id >= 0 and df.unit.find(hf.unit_id) or nil
-                    if unit then
-                        entry.unit_id = unit.id
-                        entry.name = u(dfhack.units.getReadableName(unit))
-                    elseif hf then
-                        entry.name = u(dfhack.units.getReadableName(hf))
-                    end
+                    hf = df.historical_figure.find(pos.occupant)
+                    unit = hf and hf.unit_id >= 0 and df.unit.find(hf.unit_id) or nil
+                end
+                local uniform, assigned = position_uniform(pos, unit)
+                entry.uniform = uniform
+                entry.assigned_items = assigned
+                if unit then
+                    entry.unit_id = unit.id
+                    entry.name = u(dfhack.units.getReadableName(unit))
+                    local carried, ammo = unit_equipment(unit)
+                    entry.equipment = carried
+                    entry.ammo = ammo
+                elseif hf then
+                    entry.name = u(dfhack.units.getReadableName(hf))
                 end
                 positions[#positions + 1] = entry
             end
@@ -683,6 +1307,680 @@ local function dump_squads()
 end
 
 --------------------------------------------------------------------------
+-- Visitors and residents
+--
+-- Who is in the fort but not of it: tavern guests, scholars, mercenaries,
+-- monster slayers, and the long-term residents who arrived the same way.
+-- DF puts a residency petition to the player as a popup carrying a name
+-- and a stated purpose and nothing else, and once it is dismissed there
+-- is no screen that will show the applicant's skills or history again.
+-- Everything the decision actually turns on is collected here: what they
+-- can do, who they belong to, and whether they are who they say.
+--
+-- The dangerous half is not a guess. A cover identity, an intrigue plot
+-- with a target, a CRIMINAL link to a government, a reputation as a
+-- murderer -- DF tracks all of them, and none of them are on the popup.
+--------------------------------------------------------------------------
+
+--- Which of `intrigue_plotst.parameter`'s three meanings applies. The
+--- df-structures comment reads "2:artifact_id, 5-11:actor_id, 12/15:
+--- entity_id"; anything else carries no target at all.
+local function plot_target_kind(plot_type)
+    if plot_type == df.intrigue_plot_type.Acquire_Artifact then return 'artifact' end
+    if plot_type == df.intrigue_plot_type.Counterintelligence
+        or plot_type == df.intrigue_plot_type.Infiltrate_Society then
+        return 'entity'
+    end
+    if plot_type >= df.intrigue_plot_type.Assassinate_Actor
+        and plot_type <= df.intrigue_plot_type.Corrupt_Actors_Government then
+        return 'actor'
+    end
+    return nil
+end
+
+local function entity_brief(id)
+    if id == nil or id < 0 then return nil end
+    local entity = df.historical_entity.find(id)
+    if not entity then return nil end
+    local plotinfo = df.global.plotinfo
+    return {
+        id = id,
+        name = name_of(entity.name),
+        type = enum_name(df.historical_entity_type, entity.type),
+        -- Our own civilisation and this fort's government, so a rule can
+        -- say "targets *you*" rather than naming an entity the player has
+        -- to look up.
+        ours = id == plotinfo.civ_id or id == plotinfo.group_id,
+    }
+end
+
+--- The cover story, when there is one. `unit.name` stays the real figure;
+--- everything DF shows the player -- name, race, profession, civilisation
+--- -- comes from here instead.
+local function visitor_identity(unit)
+    local identity = try(function() return dfhack.units.getIdentity(unit) end)
+    if not identity then return nil end
+    return {
+        type = enum_name(df.identity_type, identity.type),
+        -- Person names stay in the form DF's unit list uses ("Dakost
+        -- Rakustes"), so the cover name and the real one read alike.
+        -- Entity and artifact names are translated, as DF shows them.
+        name = name_of(identity.name, false),
+        race = u(try(function() return df.creature_raw.find(identity.race).name[0] end, '')),
+        profession = enum_name(df.profession, identity.profession),
+        entity = entity_brief(identity.entity_id),
+    }
+end
+
+--- Plots the figure is running, and the handlers running them. Read from
+--- the figure's own intrigue perspective, so "has a master" means DF has
+--- them taking orders, not that anyone in the fort suspects it.
+local function visitor_intrigue(hf)
+    local perspective = try(function() return hf.info.relationships.intrigues end)
+    if not perspective then return nil end
+
+    local actors = {}
+    for _, actor in ipairs(try(function() return perspective.intrigue end, {})) do
+        actors[actor.id] = actor
+    end
+
+    local function actor_name(actor)
+        if not actor then return nil end
+        local id = actor.hf_1 >= 0 and actor.hf_1 or actor.hf_2
+        local figure = id >= 0 and df.historical_figure.find(id) or nil
+        return figure and name_of(figure.name, false) or nil
+    end
+
+    local plots = A{}
+    for _, plot in ipairs(try(function() return perspective.plots end, {})) do
+        local kind = plot_target_kind(plot.plot_type)
+        local target
+        if kind == 'entity' then
+            target = entity_brief(plot.parameter)
+            if target then target.kind = 'entity' end
+        elseif kind == 'artifact' then
+            local record = df.artifact_record.find(plot.parameter)
+            if record then
+                target = {
+                    kind = 'artifact',
+                    id = plot.parameter,
+                    name = name_of(record.name),
+                    -- Whether the thing they are after is in this fort.
+                    ours = try(function()
+                        return record.site == df.global.plotinfo.site_id
+                    end, false),
+                }
+            end
+        elseif kind == 'actor' then
+            local name = actor_name(actors[plot.parameter])
+            if name then target = {kind = 'figure', id = plot.parameter, name = name} end
+        end
+        plots[#plots + 1] = {
+            type = enum_name(df.intrigue_plot_type, plot.plot_type),
+            on_hold = try(function() return plot.flags.on_hold end, false),
+            target = target,
+        }
+    end
+
+    local roles = A{}
+    local master
+    for _, actor in ipairs(try(function() return perspective.intrigue end, {})) do
+        local role = enum_name(df.plot_role_type, actor.role)
+        if role and role ~= 'None' then
+            roles[#roles + 1] = {role = role, name = actor_name(actor)}
+            if role == 'Master' then master = actor_name(actor) end
+        end
+    end
+
+    return {plots = plots, roles = roles, master = master}
+end
+
+--- What entities have on file about them. DF keeps this per entity, so a
+--- murderer known to their homeland is not necessarily known to us --
+--- `ours` is the difference between a warning the fort could act on and
+--- one the player only gets to see through DFHack.
+local function visitor_reputations(hf)
+    local out = A{}
+    for _, profile in ipairs(try(function() return hf.info.reputation.wanted end, {})) do
+        local types = A{}
+        for i, kind in ipairs(try(function() return profile.reputation.types end, {})) do
+            local name = enum_name(df.reputation_type, kind)
+            if name and name ~= 'NONE' then
+                types[#types + 1] = {
+                    key = name,
+                    level = try(function() return profile.reputation.levels[i] end, 0),
+                }
+            end
+        end
+        local murders = try(function() return profile.reputation.unsolved_murders end, 0)
+        local exiled = try(function() return profile.flags.exiled end, false)
+        if #types > 0 or murders > 0 or exiled then
+            local entity = entity_brief(profile.entity_id)
+            out[#out + 1] = {
+                entity = entity and entity.name or '',
+                entity_id = profile.entity_id,
+                ours = entity and entity.ours or false,
+                exiled = exiled,
+                unsolved_murders = murders,
+                types = types,
+            }
+        end
+    end
+    return out
+end
+
+--- Entity ties, which is where DF files "wanted by that government" and
+--- "counts that government among their enemies" alongside plain
+--- membership. Only the links that say something are kept.
+local function visitor_groups(hf)
+    local out = A{}
+    for _, link in ipairs(try(function() return hf.entity_links end, {})) do
+        local kind = enum_name(df.histfig_entity_link_type,
+            try(function() return link:getType() end))
+        local entity = entity_brief(link.entity_id)
+        if kind and entity then
+            entity.link = kind
+            out[#out + 1] = entity
+        end
+    end
+    return out
+end
+
+local function visitor_values(unit)
+    local out = A{}
+    local soul = unit.status.current_soul
+    if not soul then return out end
+    for _, value in ipairs(try(function() return soul.personality.values end, {})) do
+        local key = enum_name(df.value_type, value.type)
+        if key then out[#out + 1] = {key = key, strength = value.strength} end
+    end
+    return out
+end
+
+--- hfid -> the residency or citizenship agreement they are party to.
+--- `plotinfo.petitions` holds the unapproved ones, which is the closest
+--- thing DF has to "waiting on the player's answer"; the accepted ones
+--- are what turned a visitor into a resident and carry the year.
+local function petition_map()
+    local plotinfo = df.global.plotinfo
+    local unapproved = {}
+    for _, id in ipairs(try(function() return plotinfo.petitions end, {})) do
+        unapproved[id] = true
+    end
+
+    local out = {}
+    for _, agreement in ipairs(try(function() return df.global.world.agreements.all end, {})) do
+        for _, details in ipairs(agreement.details) do
+            local kind, data
+            if details.type == df.agreement_details_type.Residency then
+                kind, data = 'residency', details.data.Residency
+            elseif details.type == df.agreement_details_type.Citizenship then
+                kind, data = 'citizenship', details.data.Citizenship
+            end
+            if kind and data and data.site == plotinfo.site_id then
+                local pending = unapproved[agreement.id]
+                    or try(function() return agreement.flags.petition_not_accepted end, false)
+                for _, party in ipairs(agreement.parties) do
+                    if party.id == data.applicant then
+                        for _, hfid in ipairs(party.histfig_ids) do
+                            local prev = out[hfid]
+                            -- A pending petition outranks a settled one, and
+                            -- a later one outranks an earlier: citizenship
+                            -- follows residency for the same figure.
+                            if not prev or pending or details.year >= prev.year then
+                                out[hfid] = {
+                                    kind = kind,
+                                    year = details.year,
+                                    pending = pending and true or false,
+                                    agreement_id = agreement.id,
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+--- hfid -> the post they hold here, if any. This is the fort's own record
+--- of what a visitor was taken on to do, which is a firmer answer to
+--- "what are they for" than their profession.
+local function occupation_map()
+    local out = {}
+    -- Abstract buildings -- temples, libraries, taverns -- are numbered
+    -- within their site rather than globally, so there is no `find`.
+    local locations = {}
+    local site = df.world_site.find(df.global.plotinfo.site_id)
+    for _, building in ipairs(try(function() return site.buildings end, {})) do
+        locations[building.id] = name_of(try(function() return building.name end))
+    end
+
+    for _, occupation in ipairs(try(function() return df.global.world.occupations.all end, {})) do
+        if occupation.histfig_id >= 0 and occupation.site_id == df.global.plotinfo.site_id then
+            out[occupation.histfig_id] = {
+                type = enum_name(df.occupation_type, occupation.type),
+                location = locations[occupation.location_id],
+            }
+        end
+    end
+    return out
+end
+
+local function dump_visitors()
+    local out = A{}
+    local petitions = petition_map()
+    local occupations = occupation_map()
+    local year = df.global.cur_year
+
+    for _, unit in ipairs(try(function() return df.global.world.units.active end, {})) do
+        local visiting = try(function() return dfhack.units.isVisitor(unit) end, false)
+        local resident = try(function() return dfhack.units.isResident(unit, true) end, false)
+        -- A soul is what separates a guest from a merchant's wagon, and
+        -- DF gives pack animals the visitor flag too.
+        local person = unit.status.current_soul ~= nil
+            and not try(function() return dfhack.units.isAnimal(unit) end, false)
+
+        if (visiting or resident) and person then
+            local hf = unit.hist_figure_id >= 0
+                and df.historical_figure.find(unit.hist_figure_id) or nil
+            local identity = visitor_identity(unit)
+            local arrived = hf and try(function() return hf.info.whereabouts.year end) or nil
+            local journey = hf and try(function()
+                return hf.info.reputation.journey_profile
+            end) or nil
+
+            local quest
+            if journey and journey.artifact_id and journey.artifact_id >= 0 then
+                local record = df.artifact_record.find(journey.artifact_id)
+                if record then
+                    quest = {
+                        id = journey.artifact_id,
+                        name = name_of(record.name),
+                        ours = try(function()
+                            return record.site == df.global.plotinfo.site_id
+                        end, false),
+                    }
+                end
+            end
+
+            out[#out + 1] = {
+                id = unit.id,
+                hf_id = hf and hf.id or nil,
+                -- The name DF shows, which is the cover name when there is
+                -- one. `real_name` is the figure underneath.
+                name = try(function()
+                    return u(dfhack.translation.translateName(
+                        dfhack.units.getVisibleName(unit), false))
+                end, ''),
+                full_name = u(try(function() return dfhack.units.getReadableName(unit) end, '')),
+                real_name = identity and name_of(unit.name, false) or nil,
+                nickname = u(unit.name.nickname),
+                profession = u(try(function() return dfhack.units.getProfessionName(unit) end, '')),
+                -- The enum behind that caption. The caption is DF's
+                -- localised prose ("Rat Man Dancer"); this is the stable
+                -- key a rule can branch on, and it is also where THIEF,
+                -- SNATCHER and CRIMINAL show up undisguised.
+                profession_key = enum_name(df.profession, unit.profession),
+                race = u(try(function() return dfhack.units.getRaceReadableName(unit) end, '')),
+                sex = unit.sex == 1 and 'male' or (unit.sex == 0 and 'female' or 'other'),
+                age = try(function() return math.floor(dfhack.units.getAge(unit)) end, 0),
+                status = resident and 'resident' or 'visitor',
+                -- DF's word for a guest nobody invited: night creatures and
+                -- megabeasts that wandered into the tavern arrive this way.
+                uninvited = try(function() return unit.flags2.visitor_uninvited end, false),
+                pos = {x = unit.pos.x, y = unit.pos.y, z = unit.pos.z},
+                arrived_year = arrived,
+                years_here = arrived and arrived >= 0 and (year - arrived) or nil,
+                entity = hf and entity_brief(hf.civ_id) or nil,
+                groups = hf and visitor_groups(hf) or A{},
+                occupation = hf and occupations[hf.id] or nil,
+                petition = hf and petitions[hf.id] or nil,
+                skills = unit_skills(unit),
+                values = visitor_values(unit),
+                identity = identity,
+                intrigue = hf and visitor_intrigue(hf) or nil,
+                reputations = hf and visitor_reputations(hf) or A{},
+                artifact_quest = quest,
+                journey = journey and enum_name(df.journey_type, journey.type) or nil,
+                -- DFHack's own predicates, which are the checks the game
+                -- uses rather than a guess from the creature raws.
+                curse = {
+                    hiding = try(function() return dfhack.units.isHidingCurse(unit) end, false),
+                    undead = try(function() return dfhack.units.isUndead(unit, true) end, false),
+                    night_creature = try(function() return dfhack.units.isNightCreature(unit) end, false),
+                    bloodsucker = try(function() return dfhack.units.isBloodsucker(unit) end, false),
+                    opposed_to_life = try(function() return dfhack.units.isOpposedToLife(unit) end, false),
+                    crazed = try(function() return dfhack.units.isCrazed(unit) end, false),
+                },
+                threat = {
+                    danger = try(function() return dfhack.units.isDanger(unit) end, false),
+                    great_danger = try(function() return dfhack.units.isGreatDanger(unit) end, false),
+                    invader = try(function() return dfhack.units.isInvader(unit) end, false),
+                    -- `isInvader` is the OR of three flags that mean very
+                    -- different things, so they ship separately: only
+                    -- `active_invader` is an attack in progress, while
+                    -- `invader_origin` is "arrived with a siege", which
+                    -- stays set on a goblin long after the siege ended.
+                    active_invader = try(function() return unit.flags1.active_invader end, false),
+                    invader_origin = try(function() return unit.flags1.invader_origin end, false),
+                    marauder = try(function() return unit.flags1.marauder end, false),
+                },
+                -- `world.units.active` means "on the map", not "alive":
+                -- 349 of Shieldclosed's 765 entries are corpses, and a
+                -- caged beast keeps its visitor flag. Neither is asking
+                -- to stay, so the state ships and the UI filters on it.
+                state = {
+                    dead = try(function() return dfhack.units.isKilled(unit) end, false)
+                        or not try(function() return dfhack.units.isActive(unit) end, true),
+                    ghost = try(function() return dfhack.units.isGhost(unit) end, false),
+                    caged = try(function() return unit.flags1.caged end, false),
+                    chained = try(function() return unit.flags1.chained end, false),
+                    tame = try(function() return unit.flags1.tame end, false),
+                },
+            }
+        end
+    end
+    return out
+end
+
+--------------------------------------------------------------------------
+-- Instruments
+--
+-- Instruments are the one manufactured good DF describes to itself in
+-- full. For every instrument a civilisation knows, worldgen writes real
+-- reactions -- "make sharsid keyboard", "assemble sharsid" -- and each
+-- one names its building, its skill, its reagents and whether it burns
+-- fuel. `entity.resources.reaction_idx` then lists exactly the ones this
+-- fort is allowed to run. So nothing here is transcribed from the wiki:
+-- the recipe is read out of the game, and a mod's instruments come
+-- through on the same path as the vanilla ones.
+--------------------------------------------------------------------------
+
+--- DF stores bars, thread, cloth and powders as a dimension rather than a
+--- count -- a whole metal bar is 150, a whole thread 15000 -- so a reagent
+--- asking for 300 wants two bars, not three hundred. Nothing in the raws
+--- states the full-unit figure, so it is read off the fort's own stock
+--- (the largest dimension any item of that type carries is a whole one;
+--- partly-used ones sit below it) and only falls back to these constants
+--- for a type the fort holds none of.
+local DIMENSION_UNIT = {
+    BAR = 150, POWDER_MISC = 150, LIQUID_MISC = 150, DRINK = 150,
+    THREAD = 15000, CLOTH = 10000,
+}
+
+local function item_vector(type_key)
+    if not type_key then return nil end
+    return try(function() return df.global.world.items.other[type_key] end)
+end
+
+--- The dimension of a whole one of `type_key`, or nil for item types that
+--- are simply counted.
+local function unit_dimension(type_key, cache)
+    if cache.dimension[type_key] ~= nil then
+        return cache.dimension[type_key] or nil
+    end
+    local best = nil
+    for _, item in ipairs(item_vector(type_key) or {}) do
+        local dim = try(function() return item.dimension end)
+        if type(dim) == 'number' and (best == nil or dim > best) then best = dim end
+    end
+    if best == nil then best = DIMENSION_UNIT[type_key] end
+    cache.dimension[type_key] = best or false
+    return best
+end
+
+--- How much of `reagent` the fort holds, using DF's own item-match
+--- predicate rather than a guess from the item type: "clay" is a boulder
+--- with a fired-material product, and only 93 of Shieldclosed's 730
+--- boulders are one.
+local function reagent_stock(reagent, reaction_index, type_key, cache)
+    -- A reagent can name a material without naming an item type -- "shell",
+    -- "bone" -- and there is no one vector holding those, so the scan falls
+    -- back to everything in play. It costs a full item walk, which is why
+    -- the answer is cached against the reagent's own terms: a civilisation's
+    -- instruments ask for the same sand bag over and over.
+    local vector = item_vector(type_key)
+        or try(function() return df.global.world.items.other.IN_PLAY end)
+    if not vector then return nil, nil end
+
+    local key = table.concat({
+        type_key or '*',
+        tostring(try(function() return reagent.item_subtype end)),
+        tostring(try(function() return reagent.mat_type end)),
+        tostring(try(function() return reagent.mat_index end)),
+        try(function() return reagent.reaction_class end) or '',
+        try(function() return reagent.has_material_reaction_product end) or '',
+        tostring(try(function() return reagent.flags1.whole end)),
+        tostring(try(function() return reagent.flags2.whole end)),
+        tostring(try(function() return reagent.flags3.whole end)),
+    }, '\1')
+    local hit = cache.stock[key]
+    if hit then return hit[1], hit[2] end
+
+    local items, dimension = 0, 0
+    for _, item in ipairs(vector) do
+        if try(function() return reagent:matchesRoot(item, reaction_index) end, false) then
+            items = items + 1
+            dimension = dimension + (try(function() return item.dimension end) or 0)
+        end
+    end
+    local unit = type_key and unit_dimension(type_key, cache) or nil
+    local units = items
+    if unit and unit > 0 and dimension > 0 then units = dimension // unit end
+    cache.stock[key] = {items, units}
+    return items, units
+end
+
+--- Where a reaction may be run. DF lists alternatives -- a glass piece
+--- takes either furnace -- and `building.subtype` is read against a
+--- different enum per building class, the same trap `dump_workshops` hits.
+local function reaction_buildings(r)
+    local out = A{}
+    for i, btype in ipairs(try(function() return r.building.type end, {})) do
+        local kind = enum_name(df.building_type, btype)
+        local subtype = try(function() return r.building.subtype[i] end)
+        local enum = (kind == 'Furnace' and df.furnace_type)
+            or (kind == 'Workshop' and df.workshop_type)
+            or nil
+        out[#out + 1] = {
+            kind = kind,
+            subtype = enum and enum_name(enum, subtype) or nil,
+            name = u(try(function() return enum.attrs[subtype].name end,
+                kind or 'workshop')),
+        }
+    end
+    return out
+end
+
+local function reaction_product(r)
+    for _, product in ipairs(try(function() return r.products end, {})) do
+        -- A reaction's products can include improvements, which carry no
+        -- item of their own; only the item products name what is made.
+        if try(function() return df.reaction_product_itemst:is_instance(product) end, false) then
+            return {
+                item_type = enum_name(df.item_type,
+                    try(function() return product.item_type end)),
+                item_subtype = try(function() return product.item_subtype end),
+                count = try(function() return product.count end, 1),
+            }
+        end
+    end
+    return nil
+end
+
+local function dump_reaction(r, index, describe, cache)
+    local reagents = A{}
+    for _, reagent in ipairs(try(function() return r.reagents end, {})) do
+        local type_key = enum_name(df.item_type,
+            try(function() return reagent.item_type end))
+        -- A reagent with no item type is a container the reaction only
+        -- borrows -- the bag a glassmaker's sand arrives in. There is no
+        -- one vector to count those in, so they ship without a stock
+        -- figure rather than with a wrong one.
+        if type_key == 'NONE' then type_key = nil end
+        local quantity = try(function() return reagent.quantity end, 1)
+        local stock, stock_units = reagent_stock(reagent, index, type_key, cache)
+        local unit = type_key and unit_dimension(type_key, cache) or nil
+        local description = nil
+        if describe then
+            description = u(try(function()
+                reagent:getDescription(describe, index)
+                return describe.value
+            end))
+        end
+        reagents[#reagents + 1] = {
+            code = u(try(function() return reagent.code end, '')),
+            -- DF's own phrasing for the requirement ("Clay boulders",
+            -- "Sand powder"), which beats anything assembled from the
+            -- item type and the reagent token.
+            description = description ~= '' and description or nil,
+            item_type = type_key,
+            -- Which tool an assembly step is asking for, so a piece can be
+            -- matched to its slot by identity rather than by its name.
+            item_subtype = try(function()
+                local subtype = reagent.item_subtype
+                if subtype and subtype >= 0 then return subtype end
+            end),
+            quantity = quantity,
+            unit_dimension = unit or nil,
+            units = unit and unit > 0 and math.ceil(quantity / unit) or quantity,
+            stock = stock,
+            stock_units = stock_units,
+            -- PRESERVE_REAGENT is the sand bag: needed to run the job,
+            -- handed back afterwards. Saying it is consumed would put a
+            -- bag on every shopping list forever.
+            preserve = try(function() return reagent.flags.PRESERVE_REAGENT end, false),
+            in_container = try(function() return reagent.flags.IN_CONTAINER end, false),
+        }
+    end
+
+    local skill = enum_name(df.job_skill, try(function() return r.skill end))
+    return {
+        code = u(try(function() return r.code end, '')),
+        name = u(try(function() return r.name end, '')),
+        category = u(try(function() return r.category end, '')),
+        skill = skill,
+        skill_caption = u(try(function()
+            return df.job_skill.attrs[r.skill].caption
+        end, '')),
+        fuel = try(function() return r.flags.FUEL end, false),
+        buildings = reaction_buildings(r),
+        reagents = reagents,
+        product = reaction_product(r),
+    }
+end
+
+local function dump_instruments(civ)
+    if not civ then return nil end
+
+    local reactions = try(function()
+        return df.global.world.raws.reactions.reactions
+    end, {})
+
+    -- The fort's permitted list, indexed by what each reaction makes: an
+    -- instrument for the assembly (or, for a one-piece instrument, the
+    -- whole job), a tool for each piece.
+    local by_instrument, by_tool = {}, {}
+    local cache = {dimension = {}, stock = {}}
+    local describe = try(function() return df.new('string') end)
+    for _, index in ipairs(try(function() return civ.resources.reaction_idx end, {})) do
+        local r = reactions[index]
+        local category = r and u(try(function() return r.category end, '')) or ''
+        if r and (category == 'INSTRUMENT' or category == 'INSTRUMENT_PIECE') then
+            local entry = dump_reaction(r, index, describe, cache)
+            local product = entry.product
+            if product and product.item_type == 'INSTRUMENT' then
+                by_instrument[product.item_subtype] = entry
+            elseif product and product.item_type == 'TOOL' then
+                by_tool[product.item_subtype] = entry
+            end
+        end
+    end
+
+    -- Finished instruments already in the fort, by subtype. Counted for
+    -- every subtype, not just the makeable ones: a fort's tavern fills up
+    -- with traded instruments it could never build itself.
+    local held = {}
+    for _, item in ipairs(try(function()
+        return df.global.world.items.other.INSTRUMENT
+    end, {})) do
+        local subtype = try(function() return item:getSubtype() end)
+        if subtype then held[subtype] = (held[subtype] or 0) + 1 end
+    end
+
+    local out, makeable = A{}, {}
+    for _, subtype in ipairs(try(function()
+        return civ.resources.instrument_type
+    end, {})) do
+        local def = df.itemdef_instrumentst.find(subtype)
+        if def then
+            makeable[subtype] = true
+            local pieces = A{}
+            for _, piece in ipairs(try(function() return def.pieces end, {})) do
+                local tool_index = try(function() return piece.index end)
+                pieces[#pieces + 1] = {
+                    token = u(try(function() return piece.type end, '')),
+                    name = u(try(function() return piece.name end, '')),
+                    name_plural = u(try(function() return piece.name_plural end, '')),
+                    tool_index = tool_index,
+                    -- Which piece decides the finished instrument's
+                    -- material, and so the skill the assembly is graded on.
+                    dominant = u(try(function() return piece.type end, ''))
+                        == u(try(function() return def.dominant_instrument_piece end, '')),
+                    reaction = tool_index ~= nil and by_tool[tool_index] or nil,
+                }
+            end
+            out[#out + 1] = {
+                id = subtype,
+                name = u(try(function() return def.name end, '')),
+                name_plural = u(try(function() return def.name_plural end, '')),
+                description = u(try(function() return def.description end, '')),
+                value = try(function() return def.value end, 0),
+                size = try(function() return def.size end, 0),
+                -- The music skill, which is what the instrument is *for*:
+                -- a fort with no stringed players gains nothing from a lyre.
+                skill = enum_name(df.job_skill, try(function() return def.music_skill end)),
+                skill_caption = u(try(function()
+                    return df.job_skill.attrs[def.music_skill].caption
+                end, '')),
+                -- A placed instrument is furniture: it is built on a tile
+                -- and played where it stands, never carried to a tavern.
+                placed_as_building = try(function()
+                    return def.flags.PLACED_AS_BUILDING
+                end, false),
+                in_stock = held[subtype] or 0,
+                pieces = pieces,
+                reaction = by_instrument[subtype],
+            }
+        end
+    end
+
+    -- Instruments the fort owns but cannot build. Worth naming rather than
+    -- silently dropping: they are most of what a tavern accumulates, and
+    -- their absence from the buildable list is otherwise mystifying.
+    local foreign = A{}
+    for subtype, count in pairs(held) do
+        if not makeable[subtype] then
+            local def = df.itemdef_instrumentst.find(subtype)
+            foreign[#foreign + 1] = {
+                id = subtype,
+                name = def and u(try(function() return def.name end, '')) or '?',
+                count = count,
+            }
+        end
+    end
+    table.sort(foreign, function(a, b)
+        if a.count ~= b.count then return a.count > b.count end
+        return a.name < b.name
+    end)
+
+    if describe then pcall(function() describe:delete() end) end
+    return {types = out, foreign = foreign}
+end
+
+--------------------------------------------------------------------------
 -- Entry point
 --------------------------------------------------------------------------
 
@@ -692,6 +1990,12 @@ local function build_snapshot()
 
     local work_details, work_detail_lookup = dump_work_details()
     local zones, zone_of_unit = dump_zones()
+
+    -- Built once and shared: the stockpile dump needs the tile counts, the
+    -- loose-item scan needs the tile ownership, and walking the piles twice
+    -- for the same answer would be silly.
+    local tile_map, tiles = stockpile_tile_map()
+    local incoming, store_total, store_unclaimed = dump_store_jobs()
 
     local site = df.world_site.find(plotinfo.site_id)
     local civ = df.historical_entity.find(plotinfo.civ_id)
@@ -714,16 +2018,28 @@ local function build_snapshot()
             month_name = MONTHS[tick // TICKS_PER_MONTH + 1],
             day = (tick % TICKS_PER_MONTH) // TICKS_PER_DAY + 1,
             season = season_of(tick),
+            -- What DF's own z-axis widget reads out. The game shows an
+            -- elevation against sea level, never the raw block index, so
+            -- the UI needs the offset to speak the player's language.
+            elev_offset = try(function() return df.global.world.map.region_z - 100 end),
         },
         enums = dump_enums(),
         units = dump_units(build_wave_map(), work_detail_lookup),
         work_details = work_details,
-        stockpiles = dump_stockpiles(),
+        stockpiles = dump_stockpiles(tiles, incoming),
         workshops = dump_workshops(),
         links = dump_links(),
+        flow = {
+            loose = dump_loose(tile_map),
+            hauling = dump_hauling(),
+            store_jobs = {total = store_total, unclaimed = store_unclaimed},
+        },
         zones = zones,
         animals = dump_animals(zone_of_unit),
         squads = dump_squads(),
+        armory = dump_armory(tile_map),
+        visitors = dump_visitors(),
+        instruments = dump_instruments(civ),
     }
 end
 
@@ -746,7 +2062,7 @@ return function(out_path)
     file:write(text)
     file:close()
 
-    print(('df-query: wrote %d bytes (%d units, %d animals, %d stockpiles, %d squads)')
+    print(('df-query: wrote %d bytes (%d units, %d animals, %d stockpiles, %d squads, %d guests)')
         :format(#text, #snapshot.units, #snapshot.animals,
-                #snapshot.stockpiles, #snapshot.squads))
+                #snapshot.stockpiles, #snapshot.squads, #snapshot.visitors))
 end

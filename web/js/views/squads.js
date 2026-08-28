@@ -78,10 +78,25 @@ function squadCard(db, squad) {
     shown.map((routine) => scheduleGrid(routine, routine.index === squad.cur_routine_idx)));
 }
 
+// The general skill grouping (Db#categoriseSkills) sorts by labour first, so
+// CROSSBOW and RANGED_COMBAT land under "Hunting" — they share the HUNT
+// labor with civilian hunting — not "Combat". That's right for the Skills
+// view but hides marksdwarf/archery ratings from a squad's roster. Read the
+// job_skill class directly instead: anything DF itself calls Military*, plus
+// the db's own Combat category (which still catches MILITARY_TACTICS, class
+// Normal, via its documented override) and DISCIPLINE — class Personal, but
+// a core soldier stat worth surfacing here regardless.
+function isCombatSkill(def) {
+  return Boolean(def) && (
+    def.category === 'Combat'
+    || (def.class && def.class.startsWith('Military'))
+    || def.key === 'DISCIPLINE');
+}
+
 function combatChips(db, unit) {
   const combat = unit.skills
     .map((s) => ({ ...s, def: db.skills.get(s.key) }))
-    .filter((s) => s.def && s.def.category === 'Combat' && s.rating > 0)
+    .filter((s) => isCombatSkill(s.def) && s.rating > 0)
     .sort((a, b) => b.rating - a.rating)
     .slice(0, 3);
   if (!combat.length) return h('span', { class: 'muted' }, 'untrained');

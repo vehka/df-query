@@ -41,9 +41,13 @@ DFHACK_DIR=/path/to/DFHack python3 -m df_query serve
 | View | What it answers |
 |---|---|
 | **Skills** | Best dwarf per DF skill category — combat, mining, crafts, farming, arts, scholarship… — as ranked cards, plus a filterable roster. Filter by migration wave, work detail, squad, or idleness; click any dwarf for their full skill breakdown and labours. |
-| **Stockpiles** | Every pile with its accepted categories, contents, and links. The graph mode draws which piles feed which workshops, so a broken supply chain is visible instead of inferred. |
+| **Stockpiles** | Every pile with its accepted categories, contents, and links, in three modes. **Table** lists them with an average haul cost per pile. **Strata** draws the fort in cross-section — one row per z level, labelled with the same elevation DF's own z-axis shows, piles grouped into pods of mutually close neighbours, feed links coloured by hauling cost — and puts numbers on the empty space: the walk across each gap, the climb through each band of solid rock. **Graph** is the force-directed flow diagram, ignoring geometry entirely. |
+| **Flow** | What is stuck and why: goods lying on the floor grouped by type and level, piles that have run out of room, workshops clogged with their own output, and DF's own hauling queue per class. Findings are ranked worst-first and click through to the pile on the cross-section. |
 | **Animals** | Livestock grouped by pasture, with tiles-per-grazer and a species summary per pen, or a by-species table across the whole fort. Unpastured animals and empty pastures are both called out, since those are what you're usually hunting for. |
 | **Squads** | Roster with each soldier's combat skills and current job, barracks assignments and their uses, and the 12-month training schedule as a grid with minimum-soldier counts. |
+| **Equipment** | Where the military's armour is thin, graded against each squad's own uniform. Findings worst-first, a forge order folding every gap in the fort into one line per piece against the metal actually in stock — with kit that is made and merely uncollected counted separately — and a roster with one cell per armour slot. |
+| **Visitors** | Who is in the tavern asking to stay, what they are worth, and what they are hiding. Every guest and long-term resident graded on the trade they claim — so a novice poet reads as a novice poet — alongside the concerns DF records against them and never puts on the petition popup. The spoilery half (cover identities, intrigue plots, concealed curses) is behind a **Show spoilers** switch that is off by default. Click a guest for the full dossier. |
+| **Instruments** | How to actually build one. Every instrument your civilisation knows, as a recipe card: each piece, the workshop that makes it, the exact ingredients with how many you have, whether the job burns fuel, and who in the fort is best at it — then the assembly step and what it is still waiting on. Half-built instruments lead, because a fort that already has two of the four pieces is the case DF makes hardest to see. |
 
 ## Idleness
 
@@ -55,6 +59,232 @@ roster shows an idle *rate* ("32% of 12 refreshes") instead.
 Refreshes taken at the same game tick are ignored, so pausing and mashing
 Refresh won't skew the numbers — but it also means the metric only grows while
 the game is actually running.
+
+## Hauling cost
+
+The strata view scores every feed link with one number, in tiles:
+
+```
+cost = max(dx, dy) + stair_cost × dz
+```
+
+`dx`/`dy`/`dz` are the *edge-to-edge* gaps between two footprints, not the
+distance between their centres — a pile is an area, and a dwarf walks to the
+near corner. The in-plane term is Chebyshev rather than Euclidean because DF
+units move diagonally for the same cost as orthogonally, so Euclidean would
+overstate every diagonal haul.
+
+`stair_cost` is a slider, defaulting to 2 tiles per z level. It is the one
+figure the model cannot read off the map: what a level of climbing is worth
+depends on whether your shaft is ramps, stairs, or a minecart. Slide it and
+watch which links turn red — and watch the "is stairs" figure, the share of
+the whole network's cost that is pure vertical travel.
+
+Distances ignore walls. There is no pathfinding here, so a cost is a lower
+bound: two piles either side of an unmined wall look adjacent.
+
+## Goods flow
+
+The Flow view answers a different question: not how far things are, but what
+is not moving. It reads what is lying on the floor outside every stockpile,
+how many tiles of each pile are occupied, what is parked inside each workshop,
+and DF's own count of queued hauling jobs against dwarves enabled for them.
+
+Turn on **Flow problems** in the Strata toolbar and the same data lands on the
+cross-section: a dot on every pile a finding names, the fill bar turning
+orange when a pile runs out of floor, and loose goods drawn over the footprint
+strip where they actually lie. Levels with no stockpile at all get their tally
+in the rock band they fall inside — which is usually where the surprise is.
+
+One honest limit. Dwarf Fortress does not expose whether a given stockpile
+would *accept* a given item; that lives in the settings screen, per subtype,
+per material, per quality. So every finding reasons from where goods already
+sit, and says so: *"no pile is holding ammo"*, never *"no pile accepts ammo"*.
+An empty pile configured for exactly the missing thing looks, from here,
+identical to no pile at all — so when there are empty piles, the finding
+mentions them. Treat the list as a set of leads, not a verdict.
+
+## Squad equipment
+
+The Equipment view grades every soldier against **their own squad's
+uniform** — the pieces it names, and the material class it asks for on each
+one — and tells you what it would take to close the gap. A uniform that says
+"mail shirt, leather trousers, leather gloves" is graded as written: leather
+in those slots is the standard met, not a shortfall. Only a squad with no
+uniform at all falls back to a full-metal kit, and it gets told that its
+uniform is missing first.
+
+The ranking of armour metals is not a list typed into the code. It is DF's
+own `strength.fracture[SHEAR]` for each material, read out of the running
+game, which happens to order them exactly the way players do:
+
+```
+adamantine ≫ divine metals ≫ steel > iron > bronze ≈ bismuth bronze > copper > bone > leather
+```
+
+Modded metals and the divine ones sort themselves, and pig iron lands below
+copper — which is why DF does not let you make armour from it. "The fort has
+steel" in a finding means the fort really does, either worn, in stock, or as
+bars.
+
+Three panels, in the order you act on them:
+
+- **Findings**, worst first. A whole squad in leather is one finding, not
+  nine, and eight archers with no shield is one order rather than eight —
+  the roll-ups are deliberate, and without them a fort like this reports
+  fifty problems where it has a dozen.
+- **Forge order** — every gap in the fort folded into one line per piece,
+  with what is already in stock, what must be made, and the armour-grade bars
+  on hand as the ceiling on what can be made before more is smelted.
+- **Soldiers** — one row each, one cell per slot, coloured by how far that
+  slot is from the standard. This is the evidence for everything above.
+
+Green recruits are flagged, not exempted. Armor User 0 or 1 means metal will
+slow them until they train out of it, so the finding says so — but the target
+kit stays the same, because the answer is drill, not lighter armour.
+
+### Made, but not collected
+
+A soldier not wearing their armour has not necessarily lost it. DF earmarks
+each piece for a specific dwarf the moment it exists, and the dwarf goes and
+puts it on when the squad next goes on duty — so a squad with a month off
+walks around in civilian clothes with a full set of iron waiting for it in a
+stockpile.
+
+The view keeps those apart. A slot reads **waiting** when the piece exists
+and has that soldier's name on it, and the forge order counts it in its own
+column rather than as work: nine mail shirts already made are not nine mail
+shirts to make. When the squad has no orders that month, the finding says so,
+because that is the whole explanation.
+
+Two more things the view will not tell you. Whether DF *will* actually issue
+a piece: a gap means "this soldier is not wearing it", not "DF refuses to
+give it to them". And whether a bar can become a specific piece: bar stock
+says the metal exists, not that the smithy, the fuel and the work orders do.
+
+## Judging a petition
+
+When a visitor petitions for residency, DF shows a popup with a name and a
+stated purpose on it. Dismiss it and there is no screen that will show you
+that person again — not their skills, not their history. The Visitors view is
+that screen.
+
+### What they are worth
+
+Every guest is graded on **the trade they claim**, not on their best skill.
+DF attaches a profession to most skills, so "a Maceman is judged on Mace" and
+"a Poet on Poetry" is read out of the snapshot rather than typed into the
+viewer; the visiting professions DF leaves unattached — scholar, mercenary,
+monster slayer — are the short list the code names itself.
+
+The verdict is the rating in that trade, in DF's own words. A Human Bard whose
+best musical skill is Novice reads **novice**, whatever else they are good at,
+because that is what you would be housing. The one grade that outranks the
+ladder is *would raise the ceiling*: a guest better at something than any
+citizen is the only kind whose arrival changes what the fort can do rather
+than how fast it does it, and their chip is marked.
+
+### Who is actually there
+
+DF's "active" unit list means *on the map*, not *alive* — in a year-105 fort
+roughly half of it is corpses, and a caged beast keeps the visitor flag it
+arrived with. The roster shows only guests who are standing up, and says what
+it left out: "3 dead guests, 1 caged or chained not listed".
+
+### What they are hiding
+
+**This half is behind the Show spoilers switch, off by default.** Everything
+under it is something DF means you to work out for yourself, and knowing it
+cannot be un-known. With the switch off the view says only what the game
+would show you on a guest's own screen — and hidden concerns disappear
+completely rather than leaving a count behind, because "3 hidden concerns"
+would give the game away just as thoroughly.
+
+The switch does not make an agent invisible, only unconfirmed. Shieldclosed's
+spy is still flagged with spoilers off, by the tell the wiki has recommended
+for a decade: *presents as a poet, and has no arts skill at all.*
+
+None of the following is a reading of how someone looks. Each is a field in
+the save:
+
+- **A cover identity.** `unit.name` is the real historical figure;
+  `getVisibleName` is the face. When they differ, DF is running a
+  `FalseIdentity` — its own name for the scout's cover — and the view shows
+  both names, the claimed profession, and the civilisation they claim to be
+  from, which is often yours.
+- **Intrigue plots.** A figure's plots carry a target. When the target is
+  your site government or an artifact in your fort, the finding says so and
+  names the artifact.
+- **Criminal ties.** A `CRIMINAL` link to a government is that government
+  wanting them. Membership of an `Outcast` entity is DF's word for a bandit
+  band.
+- **Reputation.** Murderer, thief, brigand, psychopath — filed per entity,
+  with a 1–100 level, and flagged harder when the entity is your own
+  civilisation.
+- **Curses and flags.** Vampires hiding what they are, and night creatures.
+- **How they got here.** `isInvader` is three DF flags OR'd together and
+  only one of them is an attack in progress; the other two mean "arrived
+  with an invasion", which stays true of a goblin for good. The view keeps
+  those apart, so a goblin who came with a siege years ago is not reported
+  as a live threat.
+- **The oldest tell.** A guest who claims a trade and has no skill in it at
+  all. On its own this only means they are bad at their job, so it sits at
+  medium — but next to a cover identity it is the giveaway the wiki has
+  described for a decade.
+
+What the view will not claim: that an accepted petitioner *will* act on a
+plot, or that a guest with nothing on file is safe. An empty record is an
+empty record.
+
+## Building an instrument
+
+Instruments are the most awkward thing a fort makes. A sharsid is four
+separate pieces — a glass keyboard, a glass chest, ceramic pipes, a leather
+bellows — each made at a different building by a different trade, and none
+of that is written down anywhere in the game. The build menu lists the jobs;
+it never lists the recipe.
+
+It turns out DF knows the whole thing. Worldgen writes a real reaction for
+every piece and every assembly your civilisation can make — *make sharsid
+keyboard*, *assemble sharsid* — and each one names its building, its skill,
+its reagents and whether it needs fuel. So nothing in this view is
+transcribed from the wiki: it is the game's own recipe, which means a
+modded instrument comes through the same way a vanilla one does.
+
+That matters because **instruments are generated per world and handed out
+per civilisation** — your fort's are not the ones in this README, and a
+lookup table keyed on material would be wrong even for another dwarf civ
+in the same world. In the world this was built against, one dwarf
+civilisation makes a stone instrument body with Masonry at the Mason's
+Workshop while another makes its stone piece with Stonecrafting at the
+Craftsdwarf's Workshop. Only the reaction knows which.
+
+Against that, the view puts what your fort actually has:
+
+- **Ingredients, in units you can count.** DF stores bars, thread, cloth
+  and powder as a dimension rather than a count — a whole metal bar is
+  150, a whole thread 15000 — so a reagent asking for 300 wants two bars.
+  The counts come from DF's own item-match predicate rather than from the
+  item type, which matters more than it sounds: only 93 of Shieldclosed's
+  730 boulders are clay, and of its 6,350 threads, none at all are silk.
+  That last one is why one instrument reads as blocked.
+- **Which workshop, and whether you have one.** Alternatives are joined
+  with "or", because DF offers a magma twin for every heated job. A
+  workshop the fort lacks is called out at the top of the view with the
+  recipes it would unlock.
+- **How far along you already are.** A piece is a tool like any other, and
+  nothing in the game marks one as belonging to a half-built instrument —
+  so a fort quietly accumulates two of the four pieces it needs and never
+  mentions it. Half-built instruments sort to the front.
+- **Who should be at the bench.** The best hand in the fort at that exact
+  skill, which for an instrument is not a detail: quality is most of what
+  an instrument is worth.
+
+Two things it will not say. That a job cannot run for want of skill — DF
+gates work on the labour, not the rating, so an unskilled fort gets a poor
+instrument, not no instrument. And that a piece you own is one you made:
+it might have arrived with a caravan, which is also why the view can list
+the instruments the fort owns but has no recipe for.
 
 ## How it works
 
