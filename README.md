@@ -317,3 +317,7 @@ data/               snapshots and idle history (gitignored)
 
 See [AGENTS.md](./AGENTS.md) for the snapshot schema, DF structure gotchas,
 and conventions for working on the code.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
