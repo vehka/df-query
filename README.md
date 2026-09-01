@@ -43,6 +43,7 @@ DFHACK_DIR=/path/to/DFHack python3 -m df_query serve
 | **Skills** | Best dwarf per DF skill category — combat, mining, crafts, farming, arts, scholarship… — as ranked cards, plus a filterable roster. Filter by migration wave, work detail, squad, or idleness; click any dwarf for their full skill breakdown and labours. |
 | **Stockpiles** | Every pile with its accepted categories, contents, and links, in three modes. **Table** lists them with an average haul cost per pile. **Strata** draws the fort in cross-section — one row per z level, labelled with the same elevation DF's own z-axis shows, piles grouped into pods of mutually close neighbours, feed links coloured by hauling cost — and puts numbers on the empty space: the walk across each gap, the climb through each band of solid rock. **Graph** is the force-directed flow diagram, ignoring geometry entirely. |
 | **Flow** | What is stuck and why: goods lying on the floor grouped by type and level, piles that have run out of room, workshops clogged with their own output, and DF's own hauling queue per class. Findings are ranked worst-first and click through to the pile on the cross-section. |
+| **Containers** | How many bins, barrels, bags, buckets, pots, jugs, minecarts and wheelbarrows the fort has — and, the part the stocks screen leaves out, how many of them are *free*. One row per kind with what the full ones hold, what they are made of, and which piles the spare ones are sitting in, grouped into storage, hauling gear, animals, personal kit, furniture and records. Findings lead with the kinds you have run dry and the minecart routes with no cart assigned. |
 | **Animals** | Livestock grouped by pasture, with tiles-per-grazer and a species summary per pen, or a by-species table across the whole fort. Unpastured animals and empty pastures are both called out, since those are what you're usually hunting for. |
 | **Squads** | Roster with each soldier's combat skills and current job, barracks assignments and their uses, and the 12-month training schedule as a grid with minimum-soldier counts. |
 | **Equipment** | Where the military's armour is thin, graded against each squad's own uniform. Findings worst-first, a forge order folding every gap in the fort into one line per piece against the metal actually in stock — with kit that is made and merely uncollected counted separately — and a roster with one cell per armour slot. |
@@ -103,6 +104,47 @@ sit, and says so: *"no pile is holding ammo"*, never *"no pile accepts ammo"*.
 An empty pile configured for exactly the missing thing looks, from here,
 identical to no pile at all — so when there are empty piles, the finding
 mentions them. Treat the list as a set of leads, not a verdict.
+
+## Containers
+
+DF's stocks screen will tell you the fort has 122 barrels. It will not tell
+you that 96 of them are full, which is the only figure that decides whether
+the brewery keeps running. The one place that number surfaces in game is a
+work-order condition — one container kind at a time, buried three screens
+deep — so the Containers view leads with it and calls it **free**.
+
+Free is deliberately narrower than empty. A coffer installed in a bedroom is
+empty and unavailable. A bag sitting inside a barrel is empty and already
+doing its job. A bucket built into a well belongs to the well now. A
+forbidden container cannot be hauled at all. What is left — empty, lying in
+a pile or on the floor, not already claimed by a job — is what a dwarf can
+actually pick up, and it is usually a much smaller number than the stocks
+screen implies.
+
+The kinds come from the game rather than from a list here. DF states what
+each tool is *for* in the raws — a jug is a `LIQUID_CONTAINER`, a minecart
+is a `TRACK_CART`, a wheelbarrow is `HEAVY_OBJECT_HAULING` — so the view
+groups by that, and a modded tool sorts itself.
+
+Two findings are worth the view on their own. **A kind you have run dry**:
+when every jug is full, honey and milk collection simply stops, and DF
+issues no warning of any kind — the job never starts and nothing says why.
+And **a minecart route with no cart**: a route with stops set and no vehicle
+assigned is listed, looks configured, and is completely inert. The only way
+to catch it in game is to open every route in turn.
+
+Hauling gear is counted differently from storage, because it works
+differently. An empty bin assigned to a stockpile is exactly the capacity
+that pile is about to use, so it still counts as free. An empty minecart
+parked on its route is working, and does not.
+
+One thing the view will not do is guess what a container is *for*. DF
+assigns bins and barrels by each pile's own settings, and nothing in the
+snapshot says which job is about to want a bag — so every finding reasons
+from what containers are doing now, never from intent. In the same spirit,
+a full pile is only flagged as short of containers when it holds none at
+all: DF's `max_bins` figure is a one-slot-per-tile ceiling, not a request,
+and a 322-tile stone pile claiming room for 322 bins means nothing by it.
 
 ## Squad equipment
 

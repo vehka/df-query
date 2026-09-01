@@ -781,3 +781,25 @@ tr.step.done .step-name { color: var(--ink-dim); text-decoration: line-through; 
 details.flavour { margin-top: 8px; font-size: 12px; }
 details.flavour summary { color: var(--ink-dim); cursor: pointer; }
 details.flavour p { margin: 6px 0 0; color: var(--ink-dim); }
+
+/* containers */
+
+/* A kind with nothing free is the one row that stops jobs, so it gets the
+   same treatment a blocked recipe does rather than a colour of its own. */
+tr.warn-row td { background: rgba(201, 104, 63, .07); }
+tr.warn-row td:first-child { border-left: 2px solid var(--warn); }
+
+/* Chips inside a table cell: no left margin, so the column edge stays flush. */
+.chips.tight { display: inline-flex; flex-wrap: wrap; gap: 3px; }
+.chips.tight .tag,
+.chips.tight .chip { margin: 0; }
+
+/* Material classes. Deliberately muted — the point of the column is the
+   wood/stone split, not a rainbow. */
+.tag.mat-wood { border-color: #7a5f26; color: #c3a06a; }
+.tag.mat-stone { border-color: #4d4a44; color: #a8a49b; }
+.tag.mat-metal { border-color: var(--lvl-mid); color: #9fd0d2; }
+.tag.mat-cloth { border-color: #6a5a7a; color: #b6a4c9; }
+.tag.mat-leather { border-color: #6b4a34; color: #c09a7c; }
+.tag em,
+.chip em { font-style: normal; color: var(--ink-dim); }

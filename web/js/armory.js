@@ -41,6 +41,10 @@ export const MAT_CLASS_RANK = {
   leather: 2,
   wood: 1,
   cloth: 0,
+  // Stone splits out of `other` for the container view, where a stone pot
+  // and a wooden barrel are the interesting comparison. Nothing wears stone
+  // armour, so it ranks with `other` here and changes nothing.
+  stone: 0,
   other: 0,
 };
 

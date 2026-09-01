@@ -78,7 +78,10 @@ export class Db {
     this.flow = snapshot.flow || null;
     this.armory = snapshot.armory || null;
     this.instruments = snapshot.instruments || null;
+    this.containers = snapshot.containers || null;
     this.hasArmory = Boolean(this.armory && Array.isArray(this.armory.groups));
+    this.hasContainers = Boolean(this.containers
+      && Array.isArray(this.containers.kinds));
     this.hasFlow = Boolean(this.flow && this.flow.loose);
     this.hasVisitors = Array.isArray(snapshot.visitors);
     this.hasInstruments = Boolean(this.instruments
@@ -353,6 +356,17 @@ export class Db {
       captionOf: (key) => this.itemCaption(key),
       elevOf: (z) => this.elevLabel(z),
       zPenalty,
+    };
+  }
+
+  /** Everything `containers.js` needs, assembled once. */
+  containerInput() {
+    return {
+      kinds: asList(this.containers && this.containers.kinds),
+      routes: asList(this.containers && this.containers.routes),
+      stockpiles: this.stockpiles,
+      captionOf: (key) => this.itemCaption(key),
+      pileOf: (id) => this.nodeById.get(id) || null,
     };
   }
 

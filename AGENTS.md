@@ -59,6 +59,16 @@ and the pipes. Two more figures worth checking against: `akmam` is the one
 blocked recipe, on silk thread the fort has none of despite holding 6,350
 threads, and 22 of the 39 instruments in the fort are kinds it cannot make.
 
+Its containers are the Containers view's fixture, and two figures are the
+ones to check. **Every one of its six jugs is full**, so the view must say
+so at high severity — that is the whole case for the feature, since DF
+reports nothing when a job stalls for want of a jug. And it has **four
+minecart routes but three minecarts**: "Quantum 4" has stops set and no
+cart, which makes it silently inert. Two more that catch specific bugs: the
+fort holds 133 bags of which about 40 are free (if that reads as zero, the
+`empty - nested` arithmetic is back), and 22-ish wheelbarrows are assigned
+to piles (if that reads as zero, the `item_type.WHEELBARROW` bug is back).
+
 Of those 25 guests only 21 are standing up: three are corpses DF still keeps
 in `world.units.active`, and one is a caged cyclops. That four-way split is
 itself a fixture — if the Visitors view starts grading dead ettins again, the
@@ -424,6 +434,63 @@ Finding that out is the whole trick.
   single best argument against ever hardcoding a material→workshop table:
   it is not even stable within a race.
 
+### Container gotchas
+
+The container census is mostly counting, and every trap in it is a place
+where the obvious field means something other than what it says.
+
+- **`item.flags.container` does not mean "this one has something in it".**
+  It means "this is a container", and it is `true` on an empty barrel. The
+  only honest emptiness test is `dfhack.items.getContainedItems(item)` and
+  asking whether the result is empty. It is cheap — the whole fort's ~1,200
+  containers scan in well under a second.
+- **There is no `item_type.WHEELBARROW`.** A wheelbarrow is a `TOOL`, and
+  `stockpile.storage.container_type` therefore reads `TOOL` for it. The old
+  `stockpile_containers` compared against `have.WHEELBARROW`, which does not
+  exist, so `wheelbarrows_held` was `0` in every snapshot ever taken. The
+  kind has to come from the item's tool definition, which means resolving
+  each id in `container_item_id` rather than reading the types vector.
+- **`itemdef_toolst.tool_use` is DF's own statement of what a tool is for**
+  — `LIQUID_CONTAINER` for a jug, `FOOD_STORAGE` for a pot, `TRACK_CART`
+  for a minecart, `HEAVY_OBJECT_HAULING` for a wheelbarrow. Reading it is
+  what keeps a material→kind table out of this feature, and it is also the
+  discriminator for "is this TOOL a container at all": an instrument piece
+  has no `tool_use`, which is how a sharsid bellows stays out of the barrel
+  census. `item:hasToolUse(use)` is the same fact as a vmethod.
+- **Whole item types have no such field.** `item_type` carries no role flag
+  and there is no `isContainer` predicate on `df.item`, so `CONTAINER_TYPES`
+  in the dumper is a list, the same compromise `EQUIPMENT_TYPES` makes.
+- **`BAG` is its own item type, not a soft `BOX`.** A `BOX` is a chest or a
+  coffer and is always rigid; scanning `items.other.BOX` for cloth to find
+  the bags returns nothing, and the fort's 133 bags are in
+  `items.other.BAG`.
+- **`stockpile.storage.container_item_id` is the exact container→pile map.**
+  No position lookup is needed for an assigned bin, and it is the only place
+  a wheelbarrow's assignment is visible at all. Its sibling `container_type`
+  is parallel but, per the wheelbarrow trap above, too coarse to key on.
+- **`use_mode == PERM` means "committed to this building", and it covers
+  two cases that look nothing alike.** A coffer built as bedroom furniture
+  is PERM in its own building, and so is the bucket built into a well or an
+  ashery. DF draws no distinction; only the *holder building's type* tells
+  the machine from the item installed as itself. Reporting both gives the
+  player the news that their coffer is a coffer, which is why the dumper
+  ships the holder's `kind` and `MACHINE_BUILDINGS` in `containers.js`
+  filters on it.
+- **`flags.in_inventory` covers a dwarf carrying a bag *and* a bag sitting
+  inside a barrel.** `dfhack.items.getHolderUnit` is what separates them;
+  without it, 46 nested bags read as 46 dwarves walking around with luggage.
+- **Hauling routes live at `plotinfo.hauling.routes`, not `world.hauling`.**
+  A route's carts are `route.vehicle_ids` → `df.vehicle.find(id).item_id`,
+  and a route with an empty `vehicle_ids` is configured, listed and
+  completely inert. DF reports nothing about it and the only way to notice
+  in game is to open every route in turn.
+- **`material_grade` had no stone branch**, because it was written to rank
+  armour and nobody wears stone. Everything stone therefore came out as
+  `other`, which is fatal for this view — the wood/stone split is the whole
+  point of its material column. `IS_STONE` now splits out, and `stone` was
+  added to `MAT_CLASS_RANK` at the same rank `other` had, so the equipment
+  view is unaffected.
+
 ### Structure references
 
 In order of usefulness:
@@ -665,6 +732,54 @@ One module serves the instruments view only:
   nothing in the snapshot marks a tool as belonging to a half-built
   instrument, which is exactly why the view is useful.
 
+One module serves the containers view only:
+
+- `web/js/containers.js` — the census, the roles, and the concerns. Pure,
+  like the other five: `census(input)` groups every kind into its display
+  section, `summarise(input)` gives the headline figures and
+  `diagnose(input)` the concerns worst-first, all three checkable with
+  `node` against a snapshot.
+
+  **`free` is the column the view exists for, and it is not `empty`.** A
+  coffer installed in a bedroom is empty and unavailable; a bag inside a
+  barrel is empty and already doing its job; a forbidden one cannot be
+  hauled at all. The dumper decides it per item — empty, lying in a pile or
+  on the floor, not forbidden, not already claimed by a job — because it
+  *cannot be recovered from the totals afterwards*: `empty` and `nested`
+  count different sets of containers, so `empty - nested` goes negative and
+  reported a fort holding forty spare bags as having none. Do not
+  reintroduce that arithmetic.
+
+  Hauling gear is the one exception to "assigned still counts as free".
+  An empty bin assigned to a pile is precisely the capacity that pile is
+  about to use, but an empty minecart parked on its route is working, so
+  `free()` subtracts `deployed()` for gear only. The two halves of
+  "deployed" live in different places — a wheelbarrow is claimed by a
+  stockpile (`assigned`, off `container_item_id`) and a minecart by a
+  hauling route — so a cart on a route reads as `assigned: 0` and would
+  otherwise look spare.
+
+  `ROLE_BY_USE` and `ROLE_BY_TYPE` are the only hardcoded taxonomy here,
+  and only the second is really hardcoded: tool roles are derived from
+  `tool_use`, so a modded tool sorts itself. `pileSlot()` mirrors the
+  dumper's bin/barrel/wheelbarrow split and the two have to agree — it is
+  what lets the `wood-bound` rule offer a stone *pot* in place of a wooden
+  barrel and not a stone coffer, which stores no drink. Thresholds
+  (`SCARCE_RATIO`, `SCARCE_FLOOR`, `IDLE_GEAR_MIN`, `MONOCULTURE_SHARE`)
+  are exported constants; tune those rather than burying numbers in rules.
+
+  Three things it must never claim. That a container will be *used* for
+  anything: DF assigns bins and barrels by the pile's own settings and
+  nothing in the snapshot says which job is about to want a bag, so every
+  rule reasons from state and never from intent. That a full pile wants
+  more containers *because DF has room for them* — `max_bins`/`max_barrels`
+  are the one-slot-per-tile ceiling described in the goods-flow gotchas, so
+  `pile-cramped` only fires on a full pile holding **no** containers at
+  all, where the recommendation needs no such number. And that a wooden
+  container is a mistake: `wood-bound` is informational, fires only for
+  kinds a stockpile has actually claimed, and names a stone substitute only
+  when the fort already makes one in the same pile slot.
+
 ### Skill categories
 
 The one place with real judgment in it. DF exposes two groupings and neither
@@ -730,6 +845,22 @@ real reload after editing JavaScript or CSS.
 
 | `instruments` | `types[]` (`id`, `name`, `name_plural`, `description`, `value`, `size`, `skill` + `skill_caption` (the *music* skill), `placed_as_building`, `in_stock`, `pieces[]` → `token`/`name`/`name_plural`/`tool_index`/`dominant`/`reaction`, `reaction` (the assembly, or the whole job for a one-piece instrument)), `foreign[]` (`id`, `name`, `count`) |
 
+| `containers` | `kinds[]` (`key`, `name`, `item_type`, `subtype`, `uses[]`, counts: `total`, `empty`, `free`, `holding`, `contents`, `in_job`, `forbidden`, `marked_dump`, `artifact`, `assigned`, and one location bucket each of `built`/`carried`/`nested`/`stored`/`loose`; plus `holds` (item_type → containers whose top item is that), `materials[]` (`material`, `mat_class`, `count`, `empty`), `piles[]` (`id`, `total`, `empty`), `buildings[]` (`id`, `name`, `kind`, `count`)), `routes[]` (`id`, `name`, `stops`, `carts[]` → `vehicle_id`/`item_id`/`missing`) |
+
+A container `kind` is either a whole item type (`key` is the `item_type`
+key, `uses` empty) or one tool definition (`key` is `TOOL:<def name>`,
+`uses` its `tool_use` list — which is what the view's roles are derived
+from). The location buckets are **exclusive and sum to `total`**;
+`assigned` cuts across them and is the count a stockpile has claimed as a
+container slot. `free` is decided per item by the dumper and is narrower
+than `empty` — see the containers module notes above for why it cannot be
+recomputed from the totals. `piles` and `buildings` are capped
+(`CONTAINER_PILE_CAP`, `CONTAINER_BUILDING_CAP`), so they are a summary,
+not a census; `materials` is not capped.
+
+`containers` is absent from snapshots taken before the container dumper
+landed, which is what `Db#hasContainers` guards.
+
 A `reaction` anywhere in `instruments` is one of DF's generated recipes:
 `code`, `name`, `category` (`INSTRUMENT` or `INSTRUMENT_PIECE`), `skill` +
 `skill_caption`, `fuel`, `buildings[]` (`kind`, `subtype`, `name` — a list
@@ -782,7 +913,20 @@ on an empty routine.
 
 - Stockpile contents are item-type counts only (`STONE 40`); materials would
   make that view far more useful. The equipment dumper reads materials for
-  gear specifically, so the machinery exists.
+  gear specifically, and the container dumper now reads them for containers,
+  so the machinery exists twice over.
+- The Containers view says a kind is exhausted but not what that will stop.
+  DF knows: a reaction's reagents name the container they want, and
+  `dump_reaction` in the instrument dumper already reads reagents whole. A
+  jug shortage that named the honey-collection job would be the finished
+  version of the feature's best finding.
+- Container demand is read from what piles hold, never from work orders.
+  `world.manager_orders` is where a player's standing "make 10 barrels"
+  lives, and comparing it against the free count would separate "you are
+  short" from "you are short and have already noticed".
+- Nothing tracks containers across refreshes. A fort whose free-barrel count
+  is falling every season is in a different situation from one sitting at a
+  steady low number, and `idle_history` is the precedent for storing it.
 - The forge order counts pieces, not bars. A breastplate is not one bar, and
   DF's own work-order screen knows the real figures.
 - The forge order says "to make" for leather lines as well as metal ones,

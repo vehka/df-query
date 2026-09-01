@@ -539,22 +539,72 @@ local function stockpile_contents(sp)
     return by_type, total, used_tiles
 end
 
+--- Every tool definition's `tool_use` list, keyed by def index.
+---
+--- `itemdef_toolst.tool_use` is DF's own statement of what a tool is *for*:
+--- LIQUID_CONTAINER for a jug, FOOD_STORAGE for a pot, TRACK_CART for a
+--- minecart, HEAVY_OBJECT_HAULING for a wheelbarrow. Reading it is what
+--- keeps a material-to-kind table out of this file -- the alternative is
+--- matching on the def's name, which is translated and which a mod moves.
+local tool_use_cache
+local function tool_uses(subtype)
+    if not tool_use_cache then
+        tool_use_cache = {}
+        for i, def in ipairs(try(function()
+            return df.global.world.raws.itemdefs.tools
+        end, {})) do
+            local uses = A{}
+            for _, use in ipairs(try(function() return def.tool_use end, {})) do
+                uses[#uses + 1] = enum_name(df.tool_uses, use)
+            end
+            tool_use_cache[i] = uses
+        end
+    end
+    return tool_use_cache[subtype or -1] or A{}
+end
+
+local function has_tool_use(subtype, use)
+    for _, key in ipairs(tool_uses(subtype)) do
+        if key == use then return true end
+    end
+    return false
+end
+
 --- Containers the pile asks for against containers it actually has. A food
 --- pile set to 20 barrels with 2 on site stores almost nothing, and nothing
 --- else in the snapshot would show it.
+---
+--- `container_type` cannot answer this on its own. A wheelbarrow is a TOOL,
+--- and there is no `item_type.WHEELBARROW` to compare against -- so the
+--- kind has to come from the item's own tool definition, which means
+--- resolving each id in `container_item_id` rather than reading the types
+--- vector beside it.
 local function stockpile_containers(sp)
     local storage = try(function() return sp.storage end)
     if not storage then return nil end
-    local have = {}
-    for _, kind in ipairs(try(function() return storage.container_type end, {})) do
-        local key = enum_name(df.item_type, kind) or 'UNKNOWN'
-        have[key] = (have[key] or 0) + 1
+    local bins, barrels, carts = 0, 0, 0
+    for _, id in ipairs(try(function() return storage.container_item_id end, {})) do
+        local item = df.item.find(id)
+        local kind = item and enum_name(df.item_type, try(function()
+            return item:getType()
+        end))
+        if kind == 'BIN' then
+            bins = bins + 1
+        elseif kind == 'BARREL' or kind == 'BUCKET' then
+            barrels = barrels + 1
+        elseif kind == 'TOOL' then
+            local subtype = try(function() return item:getSubtype() end)
+            -- DF pools bins, barrels and wheelbarrows into one container
+            -- list but counts them against separate wanted-slots. A pot is
+            -- a TOOL too, and it stores food, so it answers the barrel slot.
+            if has_tool_use(subtype, 'HEAVY_OBJECT_HAULING') then
+                carts = carts + 1
+            elseif has_tool_use(subtype, 'FOOD_STORAGE')
+                or has_tool_use(subtype, 'LIQUID_CONTAINER') then
+                barrels = barrels + 1
+            end
+        end
     end
-    -- DF counts wheelbarrows and bins/barrels in separate wanted-slots but
-    -- pools the actual containers in one list, so match on item type.
-    local bins = (have.BIN or 0)
-    local barrels = (have.BARREL or 0) + (have.BUCKET or 0)
-    local carts = (have.WHEELBARROW or 0)
     return {
         barrels_wanted = try(function() return storage.max_barrels end, 0),
         barrels_held = barrels,
@@ -940,6 +990,7 @@ local PAIRED_SLOTS = {hands = true, feet = true}
 local ITEMDEF_LISTS = {
     ARMOR = 'armor', HELM = 'helms', GLOVES = 'gloves', SHOES = 'shoes',
     PANTS = 'pants', SHIELD = 'shields', WEAPON = 'weapons', AMMO = 'ammo',
+    TOOL = 'tools',
 }
 
 local function subtype_def(kind, id)
@@ -968,6 +1019,11 @@ local function material_grade(item)
     elseif flags.LEATHER then class = 'leather'
     elseif flags.WOOD then class = 'wood'
     elseif flags.SILK or flags.YARN or flags.THREAD_PLANT then class = 'cloth'
+    -- Nothing is made of stone armour, so this branch is invisible to the
+    -- equipment view -- but a stone pot stores food exactly as a wooden
+    -- barrel does, and telling the two apart is the whole point of the
+    -- container view's material column.
+    elseif flags.IS_STONE then class = 'stone'
     end
     return {
         material = u(try(function() return mi:toString() end, '')),
@@ -1981,6 +2037,295 @@ local function dump_instruments(civ)
 end
 
 --------------------------------------------------------------------------
+-- Containers
+--------------------------------------------------------------------------
+
+--- Item types that exist to hold something else.
+---
+--- `df.item` has no `isContainer` predicate and `item_type` carries no flag
+--- for it, so this is a list -- the same compromise `EQUIPMENT_TYPES` makes
+--- a few hundred lines up. It stops at whole item types on purpose: the
+--- *tools* that store or haul things are derived from `tool_use` instead,
+--- which is why no jug, pot, minecart or wheelbarrow is named here.
+local CONTAINER_TYPES = {
+    BIN = true, BARREL = true, BAG = true, BUCKET = true, BOX = true,
+    FLASK = true, BACKPACK = true, QUIVER = true, CAGE = true,
+    ANIMALTRAP = true, COFFIN = true, CABINET = true, ARMORSTAND = true,
+    WEAPONRACK = true,
+}
+
+-- Past this the tail is noise: a kind spread over forty piles is simply
+-- everywhere, and naming them all says nothing the total did not.
+local CONTAINER_PILE_CAP = 12
+local CONTAINER_BUILDING_CAP = 8
+
+--- Sorted, capped list of a map's values.
+local function top_values(map, cap, rank)
+    local list = A{}
+    for _, value in pairs(map) do list[#list + 1] = value end
+    table.sort(list, rank)
+    while #list > cap do list[#list] = nil end
+    return list
+end
+
+--- One census row per kind of container, and where every one of them sits.
+---
+--- DF's stocks screen counts containers but never their state, so "how many
+--- empty barrels have I got?" is only answerable in game by opening the
+--- work-order conditions screen and reading a threshold off it. That number
+--- is what this section exists to produce.
+---
+--- Emptiness has to be *measured*. `item.flags.container` is set on every
+--- barrel ever made -- it means "this is a container", not "this one has
+--- something in it" -- so the only honest test is asking for the contents.
+local function dump_containers(tile_map)
+    -- Which pile has claimed each container as one of its storage slots.
+    -- `container_item_id` is exact, so these need no position lookup, and
+    -- it is the only place a wheelbarrow's assignment is visible at all.
+    local assigned_to = {}
+    for _, sp in ipairs(try(function()
+        return df.global.world.buildings.other.STOCKPILE
+    end, {})) do
+        for _, id in ipairs(try(function()
+            return sp.storage.container_item_id
+        end, {})) do
+            assigned_to[id] = sp.id
+        end
+    end
+
+    local kinds, order = {}, A{}
+
+    local function row_for(key, name, uses, type_key, subtype)
+        local row = kinds[key]
+        if not row then
+            row = {
+                key = key, name = name, item_type = type_key,
+                subtype = subtype, uses = uses,
+                total = 0, empty = 0, free = 0, holding = 0, contents = 0,
+                in_job = 0, forbidden = 0, marked_dump = 0, artifact = 0,
+                assigned = 0,
+                built = 0, carried = 0, nested = 0, stored = 0, loose = 0,
+                holds = {}, materials = {}, piles = {}, buildings = {},
+            }
+            kinds[key] = row
+            order[#order + 1] = row
+        end
+        return row
+    end
+
+    local function scan(item)
+        local type_key = enum_name(df.item_type, try(function()
+            return item:getType()
+        end))
+        if not type_key then return end
+
+        local key, name, uses, subtype = type_key, nil, A{}, nil
+        if type_key == 'TOOL' then
+            subtype = try(function() return item:getSubtype() end)
+            uses = tool_uses(subtype)
+            -- A tool DF states no use for is not storage and not hauling
+            -- gear -- it is an instrument piece, which the Instruments view
+            -- owns, or a toy. Dropping it here is what keeps a sharsid
+            -- bellows out of the barrel census.
+            if #uses == 0 then return end
+            local def = subtype_def('TOOL', subtype)
+            name = def and u(try(function() return def.name end, '')) or ''
+            if name == '' then name = 'tool' end
+            key = 'TOOL:' .. name
+        elseif CONTAINER_TYPES[type_key] then
+            -- `item_type.attrs[].caption` is DF's own word for the kind, and
+            -- it already ships in `enums.item_type`.
+            name = u(try(function()
+                return df.item_type.attrs[item:getType()].caption
+            end, ''))
+            if name == '' then name = type_key:lower() end
+        else
+            return
+        end
+
+        local row = row_for(key, name, uses, type_key, subtype)
+        local flags = item.flags
+        row.total = row.total + 1
+
+        local held = try(function()
+            return dfhack.items.getContainedItems(item)
+        end, {})
+        local empty = #held == 0
+        if empty then
+            row.empty = row.empty + 1
+        else
+            row.holding = row.holding + 1
+            row.contents = row.contents + #held
+            -- One vote per container, cast by whatever is on top. Summing
+            -- the contents instead would report 400 drinks and hide that
+            -- they sit in 23 barrels -- and it is the barrels, not the
+            -- drinks, that stop the brewery.
+            local top = enum_name(df.item_type, try(function()
+                return held[1]:getType()
+            end)) or 'UNKNOWN'
+            row.holds[top] = (row.holds[top] or 0) + 1
+        end
+
+        if try(function() return flags.in_job end, false) then
+            row.in_job = row.in_job + 1
+        end
+        if try(function() return flags.forbid end, false) then
+            row.forbidden = row.forbidden + 1
+        end
+        if try(function() return flags.dump end, false) then
+            row.marked_dump = row.marked_dump + 1
+        end
+        if try(function() return flags.artifact end, false) then
+            row.artifact = row.artifact + 1
+        end
+        if assigned_to[item.id] then row.assigned = row.assigned + 1 end
+
+        -- Where it is, one bucket per container. `in_building` outranks
+        -- everything else: a coffer installed in a bedroom is furniture,
+        -- not stock, however empty it happens to be.
+        local where
+        if try(function() return flags.in_building end, false) then
+            where = 'built'
+            local bld = try(function()
+                return dfhack.items.getHolderBuilding(item)
+            end)
+            local id = bld and try(function() return bld.id end)
+            if id then
+                local entry = row.buildings[id]
+                if not entry then
+                    entry = {
+                        id = id,
+                        name = building_name(bld, 'building'),
+                        -- Which kind of building swallowed it. A bucket
+                        -- built into a well and a coffer built as its own
+                        -- bedroom furniture are both `in_building` and both
+                        -- `use_mode == PERM`; only the building's type tells
+                        -- the machine from the item installed as itself.
+                        kind = enum_name(df.building_type, try(function()
+                            return bld:getType()
+                        end)),
+                        count = 0,
+                    }
+                    row.buildings[id] = entry
+                end
+                entry.count = entry.count + 1
+            end
+        elseif try(function() return flags.in_inventory end, false) then
+            -- `in_inventory` covers two different situations: a dwarf
+            -- carrying a bag, and a bag sitting inside a barrel. Only the
+            -- holder tells them apart.
+            where = try(function()
+                return dfhack.items.getHolderUnit(item) ~= nil
+            end, false) and 'carried' or 'nested'
+        else
+            local pos = try(function() return item.pos end)
+            local plane = pos and tile_map[pos.z]
+            local sp = plane and plane[tile_key(pos.x, pos.y)]
+            if sp then
+                where = 'stored'
+                local entry = row.piles[sp]
+                if not entry then
+                    entry = {id = sp, total = 0, empty = 0}
+                    row.piles[sp] = entry
+                end
+                entry.total = entry.total + 1
+                if empty then entry.empty = entry.empty + 1 end
+            else
+                where = 'loose'
+            end
+        end
+        row[where] = row[where] + 1
+
+        -- Free means "a job could take this one right now", which is a
+        -- narrower thing than empty. It has to be decided per item and not
+        -- by arithmetic on the totals: `empty` and `nested` count different
+        -- sets of containers, so subtracting one from the other can go
+        -- negative and reports a fort full of spare bags as having none.
+        if empty
+            and (where == 'stored' or where == 'loose')
+            and not try(function() return flags.forbid end, false)
+            and not try(function() return flags.in_job end, false)
+        then
+            row.free = row.free + 1
+        end
+
+        local grade = material_grade(item)
+        if grade then
+            local mkey = grade.material or '?'
+            local mat = row.materials[mkey]
+            if not mat then
+                mat = {material = grade.material, mat_class = grade.mat_class,
+                       count = 0, empty = 0}
+                row.materials[mkey] = mat
+            end
+            mat.count = mat.count + 1
+            if empty then mat.empty = mat.empty + 1 end
+        end
+    end
+
+    for type_key in pairs(CONTAINER_TYPES) do
+        for _, item in ipairs(try(function()
+            return df.global.world.items.other[type_key]
+        end, {})) do
+            scan(item)
+        end
+    end
+    for _, item in ipairs(try(function()
+        return df.global.world.items.other.TOOL
+    end, {})) do
+        scan(item)
+    end
+
+    local by_count = function(a, b) return a.count > b.count end
+    for _, row in ipairs(order) do
+        row.materials = top_values(row.materials, 1e9, by_count)
+        row.piles = top_values(row.piles, CONTAINER_PILE_CAP, function(a, b)
+            if a.empty ~= b.empty then return a.empty > b.empty end
+            return a.total > b.total
+        end)
+        row.buildings = top_values(row.buildings, CONTAINER_BUILDING_CAP,
+            by_count)
+    end
+    table.sort(order, function(a, b)
+        if a.total ~= b.total then return a.total > b.total end
+        return a.name < b.name
+    end)
+    return order
+end
+
+--- Minecart hauling routes, and whether each one actually has a cart.
+---
+--- A route with no vehicle assigned is configured, listed, and completely
+--- inert -- DF says nothing about it, and the only way to notice in game is
+--- to open each route and look. That is worth a line of its own.
+local function dump_routes()
+    local out = A{}
+    for _, route in ipairs(try(function()
+        return df.global.plotinfo.hauling.routes
+    end, {})) do
+        local carts = A{}
+        for _, vid in ipairs(try(function() return route.vehicle_ids end, {})) do
+            local vehicle = df.vehicle.find(vid)
+            local item_id = vehicle and try(function() return vehicle.item_id end)
+            carts[#carts + 1] = {
+                vehicle_id = vid,
+                item_id = item_id,
+                -- A vehicle whose minecart is gone leaves the route just as
+                -- stopped as one that never had a cart.
+                missing = item_id == nil or df.item.find(item_id) == nil,
+            }
+        end
+        out[#out + 1] = {
+            id = try(function() return route.id end),
+            name = u(try(function() return route.name end, '')),
+            stops = #try(function() return route.stops end, A{}),
+            carts = carts,
+        }
+    end
+    return out
+end
+
+--------------------------------------------------------------------------
 -- Entry point
 --------------------------------------------------------------------------
 
@@ -2040,6 +2385,10 @@ local function build_snapshot()
         armory = dump_armory(tile_map),
         visitors = dump_visitors(),
         instruments = dump_instruments(civ),
+        containers = {
+            kinds = dump_containers(tile_map),
+            routes = dump_routes(),
+        },
     }
 end
 
