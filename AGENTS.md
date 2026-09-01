@@ -69,6 +69,24 @@ fort holds 133 bags of which about 40 are free (if that reads as zero, the
 `empty - nested` arithmetic is back), and 22-ish wheelbarrows are assigned
 to piles (if that reads as zero, the `item_type.WHEELBARROW` bug is back).
 
+Its floor plan is the Map view's fixture, and three figures pin it down.
+The plan box is **160×68 over 23 levels** — 250,240 tiles — and it must
+encode to roughly 16,000 runs and ~107 KB; if that balloons, the run-length
+encoding or the `hidden` skip has broken. The owner mask must reproduce
+**every one of the 61 stockpile `area` counts exactly**, which is the one
+check that catches a painted-extent regression end to end. And **no level
+may report a stranded building**: this fort is fully connected, so the
+"floor with no stair or ramp" rule firing at all means the classifier has
+started eating shapes again.
+
+Two levels are the specific traps. **z165** (elev 36) is a 1,010-tile stone
+level reached by exactly one *constructed* 3×3 stairwell at 94–96, 90–92 —
+if it reads as sealed off, the `CONSTRUCTION` material override is
+clobbering stair shapes again. **z164** (elev 35) is the bedroom floor:
+644 buildings, none of them a stockpile or a workshop, which is why
+`nodes` exists and why the view must not open on it. The level it should
+open on is z163 (elev 34), the workshop floor, with 27.
+
 Of those 25 guests only 21 are standing up: three are corpses DF still keeps
 in `world.units.active`, and one is a caged cyclops. That four-way split is
 itself a fixture — if the Visitors view starts grading dead ettins again, the
@@ -467,6 +485,50 @@ Finding that out is the whole trick.
   single best argument against ever hardcoding a material→workshop table:
   it is not even stable within a race.
 
+### Tile gotchas
+
+The floor plan is mostly a loop over `dfhack.maps`, and every trap in it is
+a place where reading one field clobbers the answer from another.
+
+- **A tile's material overwrites its shape if you let it, and that deletes
+  the fort's stairs.** `tiletype_material == CONSTRUCTION` is how a
+  player-built floor is told from carved rock, which is worth drawing — but
+  applying it to every shape turns a *constructed stairway* into
+  `floor_built`. Shieldclosed's 1,010-tile stone level is served by one
+  built 3×3 stairwell, and with the override unguarded the whole level read
+  as walkable floor with no way off it. `BUILT_OVER` therefore names the
+  only two shapes construction may repaint, `FLOOR` and `WALL`.
+  Constructed ramps and fortifications are the same trap. Liquid has the
+  identical problem and the identical fix (`LIQUID_OVER`): a flooded
+  stairwell is still a stairwell.
+- **`RAMP_TOP` is not decoration, it is how you walk down.** The square
+  above a ramp is what you step onto to descend, so it has to carry the
+  same "connects to another level" flag the ramp does. Folding it into
+  `floor` — which the first pass did — makes any level whose only exit is a
+  ramp look sealed. Every vertical connection is marked on *both* sides for
+  this reason: a ramp at z has its ramp-top at z+1, a `STAIR_DOWN` has a
+  `STAIR_UP` under it. That is what makes the web UI's one-level-at-a-time
+  reachability test sound rather than merely cheap.
+- **`designation.hidden` is not optional.** 73% of the tiles in the plan's
+  box are undiscovered rock, and drawing them would be both a spoiler and a
+  map of rock nobody has seen instead of a map of the fort. Skipping them is
+  also most of why the section fits: undug rock is one long run.
+- **`world.buildings.all` is the right bounding box and the wrong level
+  count.** It gives the envelope the fort actually occupies (156×64 for
+  Shieldclosed, against a 192×192 map) but its per-level counts are
+  dominated by furniture — one bedroom floor has 644 beds and doors on it
+  and not a single stockpile. `nodes` ships alongside `buildings` for that
+  reason, and it is what the view opens on.
+- **Fetch the block, not the tile.** `dfhack.maps.getTileBlock` covers 16
+  tiles of a row, so caching it across `x // 16` is sixteen times fewer
+  lookups for the same answer. The whole plan — 250k tiles over 23 levels —
+  costs about 0.5s.
+- **A z level in the plan is not z-1 from the one above it.** Only levels
+  something is built on are dumped, so consecutive entries can be ten z
+  apart. Anything that reasons about "the level below" has to look the
+  neighbour up by `z - 1`, not take the next array element; ghosting the
+  next entry draws a floor the player is nowhere near standing on.
+
 ### Container gotchas
 
 The container census is mostly counting, and every trap in it is a place
@@ -543,6 +605,16 @@ filter state in a module-level `state` object, and redraws by calling a
 `redraw` closure threaded down from `draw()`. There is no framework and no
 virtual DOM — `h()` from `util.js` builds elements directly.
 
+The Map view is the one exception to "everything is DOM": the plan is a
+`<canvas>`, because ten thousand tiles is ten thousand SVG rects and the
+level picker has to feel instant. It costs the two things SVG gives you for
+free, and both are paid for out of the owner mask rather than the DOM — the
+tooltip and the click target come from `map.index(x, y)` and `level.owner`,
+so hit testing is an array lookup. A whole repaint, ghost layer included,
+lands in 2–17 ms per level; if that starts creeping, `paintTerrain`'s
+one-pass-per-colour loop is the thing to keep, since it is what holds
+`fillStyle` changes down to a dozen for the whole plan.
+
 `web/js/db.js` owns all interpretation of the raw snapshot: indexes by id,
 per-unit derived fields (`best` skill per category, `topSkills`, `idleRate`,
 `label`), the link adjacency (`linksOf`), the skill categorisation, the
@@ -614,6 +686,34 @@ the climb between them drawn to the same scale as the horizontal ruler.
 A crowded level can want more width than the diagram has. `fitBand` reflows
 the widest pod into fewer columns until the row fits, so chips never run off
 the right edge — if you add to the chip contents, keep that path working.
+
+One module serves the map view only:
+
+- `web/js/tilemap.js` — decoding the tile section and the two questions
+  worth asking of it. Pure, like the others: `buildTileMap(tiles)` inflates
+  the runs into typed arrays, `footprints(map, level)` gives each building's
+  real tiles, `reachability(map, level)` the walkable areas and who shares
+  them, all checkable with `node` against a snapshot.
+
+  **`footprints` is the painted extent, and it is not the box.** A pile's
+  `x1..x2` in the snapshot is its bounding box; the owner mask is what says
+  which of those tiles it actually owns. The two agree for a rectangular
+  pile and differ for the 11 of Shieldclosed's 61 that are not — checking
+  `footprints(...).tiles.length` against each pile's `area` is the test that
+  the mask survived the trip, and it passes for all 61.
+
+  **`reachability` is one level only, and the wording has to say so.** It
+  flood-fills walkable tiles eight-way — DF's diagonals are free, the same
+  reason `geometry.js` measures in Chebyshev — and reports which buildings
+  share floor. A region with no `connects` tile in it has no stair and no
+  ramp, so nothing walks off that floor; but the plan does not walk between
+  levels, so that is "reachable from somewhere this cannot see, or sealed
+  in" and never "sealed in". `POCKET_MIN` keeps a four-tile closet out of
+  the finding.
+
+  It must never claim two buildings are close because their boxes are. That
+  is what the cost model in `geometry.js` does, and it says so — this module
+  exists because a wall between two piles is invisible to it.
 
 One module serves the equipment view only:
 
@@ -885,6 +985,7 @@ real reload after editing JavaScript or CSS.
 | `stockpiles[]` | `id`, `number`, `name`, `custom_name`, bounding box + `z`, `area` (true painted tiles), `box_area`, `used_tiles`, `categories[]`, `flags[]`, `containers` (`{bins,barrels,wheelbarrows}_wanted`/`_held`), `incoming_jobs`, `item_count`, `items_by_type` |
 | `workshops[]` | `id`, `kind` (Workshop/Furnace/FarmPlot/TradeDepot), `subtype`, `name`, box + `z`, `jobs[]`, `permitted_workers[]`, `held_items`, `held_top_type`, `held_top_count` |
 | `links[]` | `{from, to}` building ids, normalised to material-flow direction and deduplicated |
+| `tiles` | The floor plan: `x1`/`y1`/`x2`/`y2` + `width`/`height` (the box every building sits in, padded by 2), `legend[]` (`code`, `key`, `walk`, `connects`), `levels[]` (`z`, `buildings`, `nodes`, `walkable`, `constructed`, `terrain[]`, `owner[]`), `dropped_levels` |
 | `zones[]` | `id`, `number`, `name`, `type` (`civzone_type`, e.g. `Pen`), `active`, box + `z`, `area`, `assigned_units[]` |
 | `animals[]` | `id`, `name`, `race`, `sex`, `age`, `zone_id`, `tame`/`grazer`/`milkable`/`egg_layer`/`war`/`hunting`/`gelded`, `marked_for_slaughter`, `training_level` |
 | `squads[]` | `id`, `name`, `alias`, `display_name`, `cur_routine_idx`, `positions[]` (`index`, `unit_id`, `name`, `uniform[]` → `category`/`slot`/`type`/`subtype`/`armor_level`/`material_class`/`material`/`assigned`/`assigned_items[]`, `assigned_items` (count), `equipment[]`, `ammo`), `rooms[]` (`name`, `modes[]`), `schedule[]` (routines → `months[]` → `orders[]`) |
@@ -897,6 +998,30 @@ real reload after editing JavaScript or CSS.
 | `instruments` | `types[]` (`id`, `name`, `name_plural`, `description`, `value`, `size`, `skill` + `skill_caption` (the *music* skill), `placed_as_building`, `in_stock`, `pieces[]` → `token`/`name`/`name_plural`/`tool_index`/`dominant`/`reaction`, `reaction` (the assembly, or the whole job for a one-piece instrument)), `foreign[]` (`id`, `name`, `count`) |
 
 | `containers` | `kinds[]` (`key`, `name`, `item_type`, `subtype`, `uses[]`, counts: `total`, `empty`, `free`, `holding`, `contents`, `in_job`, `forbidden`, `marked_dump`, `artifact`, `assigned`, and one location bucket each of `built`/`carried`/`nested`/`stored`/`loose`; plus `holds` (item_type → containers whose top item is that), `materials[]` (`material`, `mat_class`, `count`, `empty`), `piles[]` (`id`, `total`, `empty`), `buildings[]` (`id`, `name`, `kind`, `count`)), `routes[]` (`id`, `name`, `stops`, `carts[]` → `vehicle_id`/`item_id`/`missing`) |
+
+`tiles.terrain` and `tiles.owner` are **run-length encoded**, as flat
+`value, count, value, count, …` arrays in row-major order over the box —
+`inflate()` in `tilemap.js` expands them. A `terrain` value is a `legend`
+code; an `owner` value is a building id, or `0` for a tile no stockpile or
+workshop owns. Encoding matters here: Shieldclosed's plan is 250,240 tiles
+and comes out as about 16,000 runs, because a fort is overwhelmingly undug
+rock and undug rock is one long run. The whole section is ~107 KB.
+
+The owner mask covers exactly the buildings in `stockpiles[]` and
+`workshops[]` — furniture is noise on a logistics plan — and it is the
+**painted** extent, walked with `containsTile` the same way `area` is, not
+the bounding box. It doubles as the view's hit test.
+
+Only levels with something built on them are dumped, so `levels` is not
+contiguous in `z`; `nodes` counts the piles and workshops on a level while
+`buildings` counts everything DF has there, furniture included, and the two
+differ by a lot (644 against 0 on Shieldclosed's bedroom floor). If the
+fort's buildings span more of the map than `TILE_BUDGET` allows, the levels
+with the fewest buildings are dropped and `dropped_levels` says how many.
+
+`tiles` is absent from snapshots taken before the tile dumper landed, which
+is what `Db#hasTiles` guards; `Db#tileMap()` inflates it once, lazily,
+because most views never ask.
 
 A container `kind` is either a whole item type (`key` is the `item_type`
 key, `uses` empty) or one tool definition (`key` is `TOOL:<def name>`,
@@ -997,7 +1122,23 @@ on an empty routine.
   so the bolt target is still `AMMO_TARGET` rather than what the player
   asked for. `squad.ammunition` is where the real figure lives.
 - Pasture cards get very tall for a 71-animal pen — collapse or paginate.
-- No way to jump from a dwarf to where they are on the map.
+- The haul cost model still measures through walls. `geometry.js` says so
+  outright — "two piles either side of an unmined wall look adjacent" — and
+  it was the honest thing to do when the boxes were all there was. The tile
+  map is the missing half: a real path cost over walkable tiles would turn
+  every cost band in the Strata view and every distance finding in Flow
+  from a lower bound into a figure. It wants 3D connectivity first, so it
+  is the biggest of these, not the smallest.
+- Reachability stops at one level, because only the levels with something
+  built on them are dumped and there is no honest vertical adjacency to
+  walk. Dumping the levels in between — they are nearly free, being mostly
+  undiscovered rock — would let stairs and ramps be joined up and turn
+  "no way off this floor" into "not connected to the rest of the fort".
+- The plan draws no units, no zones and no loose goods in place. All three
+  have positions already: `units[].pos`, `zones[]` boxes, and the flow
+  dumper's per-item `pos` that it currently reduces to a per-level count.
+- No way to jump from a dwarf to where they are on the map. The Map view is
+  now the place that would land, and `focus(id, z)` is the hook.
 - A visitor's equipment is the other half of the wiki's agent tell — a bard
   in mail carrying a battle axe. `unit_equipment()` already reads a
   soldier's kit for the Equipment view, so pointing it at guests is mostly

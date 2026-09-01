@@ -733,6 +733,283 @@ local function dump_links()
 end
 
 --------------------------------------------------------------------------
+-- The map itself
+--
+-- Every other section describes the fort as a list. This one ships the
+-- floor plan the player actually navigates, so the web UI can draw the
+-- real shape of a level rather than inferring it from bounding boxes.
+--
+-- Three things keep it small enough to belong in a snapshot at all:
+-- it covers only the box the fort's buildings occupy, only the levels
+-- something is built on, and it run-length encodes the result. A quarter
+-- of a million tiles of Shieldclosed come out as ~19k runs, because a
+-- fort is overwhelmingly undug rock and undug rock is one long run.
+--------------------------------------------------------------------------
+
+-- The classification, and the only judgement in this section. DF's
+-- `tiletype_shape` has 19 values and a floor plan needs about half of
+-- that: what you can stand on, what stops you, and what takes you to
+-- another level. The legend ships with the snapshot so the web UI matches
+-- on names and never on these numbers.
+--
+-- `connects` is the one flag with a conclusion in it. Every way off a
+-- level is marked on **both** sides -- a ramp at z has its `ramp_top` at
+-- z+1, a `stair_down` has a `stair_up` under it -- which is what lets the
+-- web UI decide, one level at a time, whether a floor has any exit at all.
+local TILE_CLASSES = {
+    {code = 0, key = 'unknown', walk = false, connects = false},
+    {code = 1, key = 'open', walk = false, connects = false},
+    {code = 2, key = 'floor', walk = true, connects = false},
+    {code = 3, key = 'floor_built', walk = true, connects = false},
+    {code = 4, key = 'wall', walk = false, connects = false},
+    {code = 5, key = 'wall_built', walk = false, connects = false},
+    {code = 6, key = 'ramp', walk = true, connects = true},
+    {code = 7, key = 'ramp_top', walk = true, connects = true},
+    {code = 8, key = 'stair_up', walk = true, connects = true},
+    {code = 9, key = 'stair_down', walk = true, connects = true},
+    {code = 10, key = 'stair_updown', walk = true, connects = true},
+    {code = 11, key = 'fortification', walk = false, connects = false},
+    {code = 12, key = 'tree', walk = false, connects = false},
+    {code = 13, key = 'water', walk = true, connects = false},
+    {code = 14, key = 'magma', walk = false, connects = false},
+}
+
+-- `RAMP_TOP` is the square above a ramp, and it is not decoration: it is
+-- how you walk *down*. Folding it into `floor` -- which the first pass did
+-- -- makes every level whose only exit is a ramp look sealed. `BROOK_TOP`
+-- is the frozen lid of a brook and really is just floor. The tree shapes
+-- are canopy, which is neither floor nor rock and would otherwise read as
+-- a wall in the middle of a courtyard.
+local SHAPE_CLASS = {
+    EMPTY = 1, ENDLESS_PIT = 1,
+    FLOOR = 2, BOULDER = 2, PEBBLES = 2, BROOK_TOP = 2, BROOK_BED = 2,
+    SAPLING = 2, SHRUB = 2, TWIG = 2,
+    WALL = 4,
+    RAMP = 6, RAMP_TOP = 7,
+    STAIR_UP = 8, STAIR_DOWN = 9, STAIR_UPDOWN = 10,
+    FORTIFICATION = 11,
+    BRANCH = 12, TRUNK_BRANCH = 12,
+}
+
+local WATER_CODE, MAGMA_CODE = 13, 14
+
+-- What "the player built this" is allowed to change, and it is only the
+-- two shapes that carry no other meaning. A constructed stairway is a
+-- stairway first: overwriting its code with `floor_built` -- which the
+-- first pass did -- silently removes the fort's vertical circulation, and
+-- Shieldclosed's whole -1010-tile stone level then reads as sealed off.
+-- Constructed ramps and fortifications are the same trap.
+local BUILT_OVER = {[2] = 3, [4] = 5}
+
+-- The codes liquid is allowed to paint over: open air and bare floor.
+local LIQUID_OVER = {[1] = true, [2] = true, [3] = true}
+
+-- Which codes count toward the level's walkable total, read off the table
+-- above rather than listed a second time.
+local WALKABLE_CODE = {}
+for _, class in ipairs(TILE_CLASSES) do WALKABLE_CODE[class.code] = class.walk end
+
+-- A plan wider than this in any direction is not a fort, it is an embark:
+-- something is built in a far corner and the box has swallowed the map.
+-- The levels with the most buildings on them survive; the rest are
+-- reported as dropped rather than silently missing.
+local TILE_BUDGET = 600000
+
+--- The box every building sits in, padded so the corridors leading out of
+--- it are visible, and the levels worth drawing.
+local function tile_bounds()
+    local x1, y1, x2, y2 = math.huge, math.huge, -math.huge, -math.huge
+    local per_level, found = {}, false
+
+    for _, bld in ipairs(df.global.world.buildings.all) do
+        pcall(function()
+            if bld.x1 < x1 then x1 = bld.x1 end
+            if bld.y1 < y1 then y1 = bld.y1 end
+            if bld.x2 > x2 then x2 = bld.x2 end
+            if bld.y2 > y2 then y2 = bld.y2 end
+            per_level[bld.z] = (per_level[bld.z] or 0) + 1
+            found = true
+        end)
+    end
+    if not found then return nil end
+
+    local mx, my = dfhack.maps.getTileSize()
+    x1, y1 = math.max(0, x1 - 2), math.max(0, y1 - 2)
+    x2, y2 = math.min(mx - 1, x2 + 2), math.min(my - 1, y2 + 2)
+
+    local levels = {}
+    for z, count in pairs(per_level) do
+        levels[#levels + 1] = {z = z, buildings = count}
+    end
+    -- Trim by how much is built on a level, then put the survivors back in
+    -- height order: a plan you page through has to be in the order the
+    -- game's own z-axis is.
+    local area = (x2 - x1 + 1) * (y2 - y1 + 1)
+    local kept = #levels
+    if area * kept > TILE_BUDGET then
+        table.sort(levels, function(a, b) return a.buildings > b.buildings end)
+        kept = math.max(1, TILE_BUDGET // area)
+    end
+    local dropped = #levels - kept
+    for _ = 1, dropped do table.remove(levels) end
+    table.sort(levels, function(a, b) return a.z < b.z end)
+
+    return {
+        x1 = x1, y1 = y1, x2 = x2, y2 = y2,
+        levels = levels, dropped = dropped,
+    }
+end
+
+--- Which stockpile or workshop owns each tile, for the buildings the rest
+--- of the snapshot describes.
+---
+--- A stockpile is painted, not rectangular -- 11 of Shieldclosed's 61 are
+--- not boxes -- so a plan drawn from `x1..x2` puts floor under piles that
+--- have none. This is the mask that fixes it, and it doubles as the web
+--- UI's hit test: the tile under the cursor names its own building.
+local function tile_owners()
+    local by_level = {}
+
+    local function claim(bld)
+        local plane = by_level[bld.z]
+        if not plane then
+            plane = {}
+            by_level[bld.z] = plane
+        end
+        for x = bld.x1, bld.x2 do
+            for y = bld.y1, bld.y2 do
+                if try(function() return dfhack.buildings.containsTile(bld, x, y) end, true) then
+                    plane[tile_key(x, y)] = bld.id
+                end
+            end
+        end
+    end
+
+    for _, sp in ipairs(df.global.world.buildings.other.STOCKPILE) do
+        pcall(claim, sp)
+    end
+    for _, bld in ipairs(df.global.world.buildings.all) do
+        if GRAPH_BUILDING_TYPES[enum_name(df.building_type, bld:getType())] then
+            pcall(claim, bld)
+        end
+    end
+    return by_level
+end
+
+--- Append `value` to a run-length encoded array, in `value, count` pairs.
+local function rle_push(runs, value)
+    local n = #runs
+    if n > 0 and runs[n - 1] == value then
+        runs[n] = runs[n] + 1
+    else
+        runs[n + 1] = value
+        runs[n + 2] = 1
+    end
+end
+
+local function dump_tiles()
+    local bounds = tile_bounds()
+    if not bounds then return nil end
+
+    local owners = tile_owners()
+    local shape_class, material_name = {}, {}
+    local levels = A{}
+
+    for _, level in ipairs(bounds.levels) do
+        local z = level.z
+        local plane = owners[z] or {}
+        local terrain, owner = A{}, A{}
+        local walkable, built = 0, 0
+        -- Two different counts, and the difference matters: `buildings` is
+        -- every building DF has here, which on a bedroom floor is six
+        -- hundred beds and doors, while `nodes` is the piles and workshops
+        -- this viewer knows how to talk about. The second is what makes a
+        -- level worth opening the plan on.
+        local seen_nodes, nodes = {}, 0
+
+        for y = bounds.y1, bounds.y2 do
+            local block, block_x = nil, nil
+            for x = bounds.x1, bounds.x2 do
+                -- One block covers 16 tiles of this row, so fetching it per
+                -- tile would be sixteen times the lookups for one answer.
+                if block_x ~= x // 16 then
+                    block_x = x // 16
+                    block = dfhack.maps.getTileBlock(x, y, z)
+                end
+                local code = 0
+                if block then
+                    local lx, ly = x % 16, y % 16
+                    local designation = block.designation[lx][ly]
+                    -- An undiscovered tile is not ours to draw. DF hides it
+                    -- from the player, and the plan would be a map of rock
+                    -- nobody has seen rather than of the fort.
+                    if not designation.hidden then
+                        local attrs = df.tiletype.attrs[block.tiletype[lx][ly]]
+                        local shape = attrs.shape
+                        if shape_class[shape] == nil then
+                            shape_class[shape] =
+                                SHAPE_CLASS[enum_name(df.tiletype_shape, shape)] or 1
+                        end
+                        code = shape_class[shape]
+                        -- Player-built floor and wall read as their own
+                        -- classes: on a plan, the difference between rock
+                        -- somebody carved and rock somebody laid is most of
+                        -- what tells a corridor from a cavern.
+                        local material = attrs.material
+                        if material_name[material] == nil then
+                            material_name[material] =
+                                enum_name(df.tiletype_material, material) or ''
+                        end
+                        if material_name[material] == 'CONSTRUCTION' then
+                            code = BUILT_OVER[code] or code
+                            built = built + 1
+                        end
+                        -- Liquid replaces a plain floor and nothing else. A
+                        -- flooded stairwell is still a stairwell, and
+                        -- overwriting its code would drop the `connects`
+                        -- flag and report the level below as sealed off.
+                        if designation.flow_size > 0 and LIQUID_OVER[code] then
+                            code = (designation.liquid_type == 1)
+                                and MAGMA_CODE or WATER_CODE
+                        end
+                        if WALKABLE_CODE[code] then walkable = walkable + 1 end
+                    end
+                end
+                local holder = plane[tile_key(x, y)] or 0
+                if holder ~= 0 and not seen_nodes[holder] then
+                    seen_nodes[holder] = true
+                    nodes = nodes + 1
+                end
+                rle_push(terrain, code)
+                rle_push(owner, holder)
+            end
+        end
+
+        levels[#levels + 1] = {
+            z = z,
+            buildings = level.buildings,
+            nodes = nodes,
+            walkable = walkable,
+            constructed = built,
+            terrain = terrain,
+            owner = owner,
+        }
+    end
+
+    local classes = A{}
+    for _, class in ipairs(TILE_CLASSES) do classes[#classes + 1] = class end
+
+    return {
+        x1 = bounds.x1, y1 = bounds.y1, x2 = bounds.x2, y2 = bounds.y2,
+        width = bounds.x2 - bounds.x1 + 1,
+        height = bounds.y2 - bounds.y1 + 1,
+        legend = classes,
+        levels = levels,
+        dropped_levels = bounds.dropped,
+    }
+end
+
+--------------------------------------------------------------------------
 -- Goods flow
 --
 -- Why is a thing lying on the floor instead of in a pile? DF exposes no
@@ -2430,6 +2707,7 @@ local function build_snapshot()
         stockpiles = dump_stockpiles(tiles, incoming),
         workshops = dump_workshops(),
         links = dump_links(),
+        tiles = dump_tiles(),
         flow = {
             loose = dump_loose(tile_map),
             hauling = dump_hauling(),

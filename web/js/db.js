@@ -1,6 +1,7 @@
 // Turns a raw snapshot into the indexed shape the views want.
 
 import { asList } from './util.js';
+import { buildTileMap } from './tilemap.js';
 
 // DF groups skills two different ways: labour skills carry a `unit_labor`
 // whose `category` is the grouping the Labors screen uses, and everything
@@ -88,6 +89,11 @@ export class Db {
     this.hasContainers = Boolean(this.containers
       && Array.isArray(this.containers.kinds));
     this.hasFlow = Boolean(this.flow && this.flow.loose);
+    // The floor plan. Inflating the runs costs a megabyte of typed arrays,
+    // so it waits until a view asks — most never do.
+    this.tiles = snapshot.tiles || null;
+    this.hasTiles = Boolean(this.tiles && Array.isArray(this.tiles.levels)
+      && this.tiles.levels.length);
     this.hasVisitors = Array.isArray(snapshot.visitors);
     this.hasPetitions = Array.isArray(snapshot.petitions);
     this.hasInstruments = Boolean(this.instruments
@@ -375,6 +381,17 @@ export class Db {
       captionOf: (key) => this.itemCaption(key),
       pileOf: (id) => this.nodeById.get(id) || null,
     };
+  }
+
+  /**
+   * The decoded floor plan, built once and kept. Null when the snapshot
+   * predates the tile dumper.
+   */
+  tileMap() {
+    if (this.tileMapCache === undefined) {
+      this.tileMapCache = this.hasTiles ? buildTileMap(this.tiles) : null;
+    }
+    return this.tileMapCache;
   }
 
   /** The number DF prints for a raw z index, or null for old snapshots. */

@@ -803,3 +803,84 @@ tr.warn-row td:first-child { border-left: 2px solid var(--warn); }
 .tag.mat-leather { border-color: #6b4a34; color: #c09a7c; }
 .tag em,
 .chip em { font-style: normal; color: var(--ink-dim); }
+
+/* ---------------------------------------------------------------- Map view
+
+   The plan is a canvas, so almost nothing here is about the drawing itself.
+   What it does own is the frame: a scroller that pans a plan bigger than the
+   panel, and a side panel that keeps the same width whatever is selected, so
+   clicking around the map never reflows the map. */
+
+.plan-wrap {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  align-items: start;
+}
+
+.plan-scroll {
+  position: relative;
+  overflow: auto;
+  max-height: 74vh;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1px;
+}
+
+/* Undiscovered rock is drawn as nothing at all, so the panel's own
+   background is what shows through it. */
+canvas.plan { display: block; cursor: crosshair; }
+
+.plan-tip {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .45);
+}
+.plan-tip em { font-style: normal; color: var(--ink-dim); margin-left: 8px; }
+
+.plan-side {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  position: sticky;
+  top: 12px;
+  max-height: 74vh;
+  overflow: auto;
+}
+
+.plan-facts { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 10px 0; }
+.plan-facts dt { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-dim); }
+.plan-facts dd { margin: 0; font-size: 13px; }
+
+.plan-links h4 { margin-top: 10px; }
+
+.level-pick { display: flex; gap: 4px; align-items: center; }
+.level-pick button { padding: 3px 8px; line-height: 1; }
+
+.swatches { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; }
+.swatch { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-dim); }
+.swatch i {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid var(--line);
+}
+.swatch em { font-style: normal; font-variant-numeric: tabular-nums; }
+
+.warn-note { color: #f0b79c; font-size: 13px; margin: 2px 0 8px; }
+
+.link-btn { margin-top: 12px; width: 100%; }
+
+@media (max-width: 900px) {
+  .plan-wrap { grid-template-columns: minmax(0, 1fr); }
+  .plan-side { position: static; max-height: none; }
+}

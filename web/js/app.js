@@ -4,6 +4,7 @@ import { h, clear } from './util.js';
 import { Db } from './db.js';
 import * as skills from './views/skills.js';
 import * as stockpiles from './views/stockpiles.js';
+import * as map from './views/map.js';
 import * as flow from './views/flow.js';
 import * as animals from './views/animals.js';
 import * as equipment from './views/equipment.js';
@@ -15,6 +16,7 @@ import * as containers from './views/containers.js';
 const VIEWS = [
   { id: 'skills', label: 'Skills', module: skills },
   { id: 'stockpiles', label: 'Stockpiles', module: stockpiles },
+  { id: 'map', label: 'Map', module: map },
   { id: 'flow', label: 'Flow', module: flow },
   { id: 'containers', label: 'Containers', module: containers },
   { id: 'animals', label: 'Animals', module: animals },

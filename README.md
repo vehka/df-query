@@ -42,6 +42,7 @@ DFHACK_DIR=/path/to/DFHack python3 -m df_query serve
 |---|---|
 | **Skills** | Best dwarf per DF skill category — combat, mining, crafts, farming, arts, scholarship… — as ranked cards, plus a filterable roster. Filter by migration wave, work detail, squad, or idleness; click any dwarf for their full skill breakdown and labours. |
 | **Stockpiles** | Every pile with its accepted categories, contents, and links, in three modes. **Table** lists them with an average haul cost per pile. **Strata** draws the fort in cross-section — one row per z level, labelled with the same elevation DF's own z-axis shows, piles grouped into pods of mutually close neighbours, feed links coloured by hauling cost — and puts numbers on the empty space: the walk across each gap, the climb through each band of solid rock. **Graph** is the force-directed flow diagram, ignoring geometry entirely. |
+| **Map** | The floor plan, one z level at a time, drawn where it actually is. Walls, floors, stairs, ramps, water and magma from the real tile map; stockpiles and workshops outlined by their *painted* tiles rather than their bounding boxes; feed links drawn between them, with the ones leaving the level counted at the building instead of drawn to nowhere. The level below can be ghosted underneath. Click anything for its footprint, contents and links. Undiscovered rock is left blank, because DF hides it from you too. |
 | **Flow** | What is stuck and why: goods lying on the floor grouped by type and level, piles that have run out of room, workshops clogged with their own output, and DF's own hauling queue per class. Findings are ranked worst-first and click through to the pile on the cross-section. |
 | **Containers** | How many bins, barrels, bags, buckets, pots, jugs, minecarts and wheelbarrows the fort has — and, the part the stocks screen leaves out, how many of them are *free*. One row per kind with what the full ones hold, what they are made of, and which piles the spare ones are sitting in, grouped into storage, hauling gear, animals, personal kit, furniture and records. Findings lead with the kinds you have run dry and the minecart routes with no cart assigned. |
 | **Animals** | Livestock grouped by pasture, with tiles-per-grazer and a species summary per pen, or a by-species table across the whole fort. Unpastured animals and empty pastures are both called out, since those are what you're usually hunting for. |
@@ -83,6 +84,30 @@ the whole network's cost that is pure vertical travel.
 
 Distances ignore walls. There is no pathfinding here, so a cost is a lower
 bound: two piles either side of an unmined wall look adjacent.
+
+## The map
+
+The Map view is the cross-section's opposite number, and the two are meant to
+be used together. Strata compresses every level onto one screen and pays for
+it with a layout that is nobody's real geometry — piles cluster into pods at a
+centroid, and map Y is squeezed into a vertical nudge. The plan gives that up
+to draw one level exactly where it is, so what you work out here transfers
+straight back to the game's own screen.
+
+Every level shares one coordinate frame, so paging up and down keeps the fort
+in the same place under your eye, and the "ghost level below" checkbox draws
+the floor directly underneath faintly beneath the current one.
+
+Two things the plan can say that a list of boxes cannot. A stockpile is
+*painted*, not rectangular — 11 of Shieldclosed's 61 are not boxes — so the
+outline follows the tiles the pile really owns. And the walkable tiles on a
+level fall into separate areas: the view counts them, and if a pile or
+workshop sits on an area with no stair and no ramp anywhere in it, it says so.
+
+That last one is a lead, not a verdict. The plan only walks one level at a
+time, so a floor with no way off it may still be reached from above; the
+finding says which question it is answering. Undiscovered rock is drawn as
+nothing at all, so the plan shows you what your dwarves have seen and no more.
 
 ## Goods flow
 
