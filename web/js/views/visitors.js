@@ -10,7 +10,7 @@
 
 import { h, clear, plural, matches, asList } from '../util.js';
 import {
-  diagnose, summarise, roster, words,
+  diagnose, summarise, roster, groupPetitions, words,
   WEAK_RATING, GOOD_RATING, STRONG_RATING,
 } from '../visitors.js';
 
@@ -111,8 +111,12 @@ export function render(root, db) {
   redraw();
 }
 
-function keep(person) {
-  if (state.who === 'pending' && !person.pending) return false;
+function keep(person, groupOf) {
+  const group = groupOf.get(person.visitor.hf_id) || null;
+  // "Petitions waiting" means everyone the pending answer covers, which
+  // includes a troupe member with nothing on their own record: the player
+  // is about to decide about them too.
+  if (state.who === 'pending' && !person.pending && !(group && group.pending)) return false;
   if (state.who === 'visitor' && person.visitor.status !== 'visitor') return false;
   if (state.who === 'resident' && person.visitor.status !== 'resident') return false;
   if (state.risk !== 'all' && person.risk !== state.risk) return false;
@@ -123,6 +127,7 @@ function keep(person) {
     || matches(v.race, state.search)
     || matches(v.profession, state.search)
     || matches(v.entity && v.entity.name, state.search)
+    || matches(group && group.name, state.search)
     || person.standouts.some((s) => matches(s.caption, state.search));
 }
 
@@ -130,12 +135,23 @@ function draw(body, db) {
   clear(body);
   const input = { ...db.visitorInput(), spoilers: state.spoilers };
   const people = roster(input);
-  const kept = people.filter(keep);
+  // A group petition covers people who have no petition of their own, so
+  // the roster needs to be able to look one up by member to explain why a
+  // guest is standing here as a resident with nothing on their own record.
+  const groups = groupPetitions(input);
+  const groupOf = new Map();
+  for (const group of groups) {
+    for (const member of group.members) {
+      if (!groupOf.has(member.hf_id)) groupOf.set(member.hf_id, group);
+    }
+  }
+  const kept = people.filter((p) => keep(p, groupOf));
 
   const stats = summarise(input);
   body.append(headline(stats));
   body.append(concerns(diagnose(input), db));
-  body.append(rosterTable(kept, people.length, stats.absent, db, () => draw(body, db)));
+  if (groups.length) body.append(groupPanel(groups, db, () => draw(body, db)));
+  body.append(rosterTable(kept, people.length, stats.absent, groupOf, db, () => draw(body, db)));
 
   if (state.selectedId !== null) {
     const person = people.find((p) => p.id === state.selectedId);
@@ -208,6 +224,63 @@ function concerns(findings, db) {
   return section;
 }
 
+// -------------------------------------------------------- group petitions
+
+/**
+ * Petitions filed by a group. These get their own panel because they are
+ * not a row in the roster and never can be: DF names the *entity* on the
+ * agreement and leaves the applicant's histfig list empty, so there is no
+ * guest to attach the decision to, and most of the membership is not in
+ * the fort to be listed anyway.
+ *
+ * The split between who is here and who is still travelling is the whole
+ * substance of the decision — accepting a troupe takes in the members the
+ * player cannot inspect, so the count of those is stated rather than left
+ * to be inferred from a short list of names.
+ */
+function groupPanel(groups, db, redraw) {
+  const section = h('section', { class: 'panel' },
+    h('h3', {}, plural(groups.length, 'group petition'),
+      h('span', { class: 'muted' },
+        ' · filed by the group itself, so they belong to no single guest below')));
+
+  for (const group of groups) {
+    const card = h('article', { class: `finding ${group.pending ? 'high' : 'info'}` },
+      h('div', { class: 'finding-head' },
+        group.pending
+          ? h('span', { class: 'sev high' }, 'waiting')
+          : h('span', { class: 'muted' }, `yr ${group.year}`),
+        h('h4', {}, group.name,
+          group.entity && group.entity.type
+            ? h('span', { class: 'muted' }, ` · ${words(group.entity.type)}`)
+            : null)),
+      h('p', { class: 'finding-detail' },
+        group.pending
+          ? `Asking for ${group.kind}. `
+          : `${group.kind.charAt(0).toUpperCase()}${group.kind.slice(1)} agreed in year ${group.year}. `,
+        `${plural(group.members.length, 'member')}, `,
+        group.here.length
+          ? `${group.here.length} in the fort`
+          : 'none of them in the fort yet',
+        group.elsewhere
+          ? ` · ${group.elsewhere} still travelling, and ${group.pending ? 'accepting' : 'the agreement'} covers them too.`
+          : '.'));
+
+    if (group.here.length) {
+      card.append(h('div', { class: 'chips' }, group.here.map((person) => h('span', {
+        class: 'chip',
+        title: `${person.role.label} · click to open the dossier`,
+        onclick: () => {
+          state.selectedId = state.selectedId === person.id ? null : person.id;
+          redraw();
+        },
+      }, person.name))));
+    }
+    section.append(card);
+  }
+  return section;
+}
+
 // ------------------------------------------------------------------ roster
 
 /**
@@ -227,7 +300,7 @@ function absentNote(absent) {
     ` · ${parts.join(', ')} not listed — DF keeps them in the same list as the living`);
 }
 
-function rosterTable(people, total, absent, db, redraw) {
+function rosterTable(people, total, absent, groupOf, db, redraw) {
   const section = h('section', { class: 'panel' },
     h('h3', {}, 'Guests',
       h('span', { class: 'muted' },
@@ -252,18 +325,20 @@ function rosterTable(people, total, absent, db, redraw) {
       h('th', {}, 'Worth'),
       h('th', {}, 'Risk'),
       h('th', {}, 'Best skills'))),
-    h('tbody', {}, people.map((person) => row(person, db, redraw))))));
+    h('tbody', {}, people.map((person) => row(person, groupOf, db, redraw))))));
   return section;
 }
 
-function row(person, db, redraw) {
+function row(person, groupOf, db, redraw) {
   const v = person.visitor;
   const worth = WORTH[person.worth.key];
   const risk = RISK_LABEL[person.risk];
 
+  const group = groupOf.get(v.hf_id) || null;
+
   return h('tr', {
     class: `${state.selectedId === person.id ? 'selected' : ''}`
-      + `${person.pending ? ' pending' : ''}`,
+      + `${person.pending || (group && group.pending) ? ' pending' : ''}`,
     onclick: () => {
       state.selectedId = state.selectedId === person.id ? null : person.id;
       redraw();
@@ -276,7 +351,7 @@ function row(person, db, redraw) {
       // `masked` is already false when spoilers are off, so the badge is
       // simply absent rather than present-but-vague.
       person.masked ? h('span', { class: 'badge warn', title: `really ${v.real_name}` }, 'alias') : null),
-    h('td', {}, standing(v)),
+    h('td', {}, standing(v, group)),
     h('td', { class: 'muted' }, v.race),
     h('td', { class: 'num muted' }, String(v.age)),
     h('td', {},
@@ -305,13 +380,26 @@ function row(person, db, redraw) {
     }, `${s.caption} ${s.rating}`))));
 }
 
-function standing(v) {
+/**
+ * `group` is the group petition this guest is covered by, if any. Without
+ * it a troupe member reads as a bare "resident" with no year and no reason
+ * — their own `petition` is empty, because the agreement names the troupe
+ * rather than them.
+ */
+function standing(v, group) {
   if (v.petition && v.petition.pending) {
     return h('span', { class: 'badge' }, `${v.petition.kind} pending`);
   }
+  if (group && group.pending) {
+    return h('span', { class: 'badge', title: `${group.name} petitioned as a group` },
+      `${group.kind} pending · group`);
+  }
   if (v.status === 'resident') {
-    return h('span', { class: 'muted', title: v.petition ? `accepted in year ${v.petition.year}` : null },
-      `resident${v.petition ? ` · yr ${v.petition.year}` : ''}`);
+    const via = v.petition
+      ? `accepted in year ${v.petition.year}`
+      : (group ? `through ${group.name}, agreed in year ${group.year}` : null);
+    return h('span', { class: 'muted', title: via },
+      `resident${v.petition ? ` · yr ${v.petition.year}` : (group ? ` · with ${group.name}` : '')}`);
   }
   return h('span', { class: v.uninvited ? 'warn-text' : 'muted' },
     v.uninvited ? 'uninvited' : 'visitor');

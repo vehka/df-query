@@ -74,6 +74,17 @@ in `world.units.active`, and one is a caged cyclops. That four-way split is
 itself a fixture — if the Visitors view starts grading dead ettins again, the
 presence filter broke.
 
+The **group petition** fixture is agreement 291, in which the performance
+troupe "The Rains of Death" (entity 876) asked for residency in year 106.
+Its applicant party carries `entity_ids [876]` and an *empty* `histfig_ids`,
+which is the shape that used to make it vanish; of its 15 members exactly
+one — Dacap Ciromastrod, hf 5072 — was in the fort. So the group panel must
+read "15 members, 1 in the fort · 14 still travelling", and Dacap's own
+`petition` must stay absent while his roster row still explains itself as a
+resident through the troupe. It was accepted mid-development, so the live
+fort now shows the settled form; flipping `pending` in the snapshot by hand
+is how the waiting form gets checked.
+
 It also has, at time of writing, a live agent in the tavern: unit 1472,
 presenting as "Dakost Rakustes", really Iddim Tirekindling of the Kindled
 Wisps, running a plot to steal artifact 400. That is the fixture the visitor
@@ -323,6 +334,28 @@ and almost none of it is where you would first look.
   most of DF's tagged unions. `plotinfo.petitions` holds the ids of
   agreements the player has not answered, and `flags.petition_not_accepted`
   is the same fact on the agreement itself; the dumper checks both.
+- **An agreement's applicant party comes in two shapes, and one of them
+  names nobody.** An individual petitions with `party.histfig_ids`
+  populated. A **performance troupe petitions as an entity**: `histfig_ids`
+  is empty and `entity_ids` holds the troupe, so a reader that walks only
+  `histfig_ids` finds no one to attach the petition to and drops it
+  entirely — silently, because the loop body simply never runs. That is
+  what made "The Rains of Death wishes to reside in Shieldclosed" visible
+  in DF's popup and absent from this viewer. `petition_map` returns the two
+  shapes separately (`units` and `groups`) for that reason. It is rare but
+  not exotic: 24 of Shieldclosed's 25 site agreements are individual and
+  exactly one is entity-filed.
+- **A group petition is not a fact about any one member.** DF asks about
+  the whole troupe at once and the membership is mostly *not on the map* —
+  Shieldclosed's had 1 of 15 in the tavern when it petitioned. So the
+  members ship as historical figures and `groupPetitions()` in
+  `visitors.js` joins them to the roster on `hf_id`; `presence()` stays the
+  single place that decides who is actually here.
+- **An accepted group agreement leaves its members with no petition of
+  their own.** The troupe member in the tavern reads `status: resident`
+  with `petition` absent, which is why the roster's `standing` cell takes
+  the group as a second argument — without it the row says "resident" and
+  cannot say why.
 - **Abstract buildings have no global `find`.** Temples, libraries and
   taverns are numbered within their site, so `occupation.location_id` is
   resolved against `world_site.buildings`, not `df.abstract_building`.
@@ -701,6 +734,22 @@ One module serves the visitors view only:
   personality notes roll up, once `ROLLUP_MIN` guests share one — eight
   guests who dislike the law is one note about the tavern.
 
+  **A group petition is the one decision with no row in the roster.**
+  `groupPetitions(input)` grades those, and the split it reports — `here`
+  against `elsewhere` — is the substance of the choice: accepting a troupe
+  takes in the members the player cannot inspect, so the count of those is
+  stated outright rather than left to be inferred from a short list of
+  names. It gets its own panel and its own `pending-group` finding instead
+  of being folded into the per-guest `pending` count, because the answer is
+  a single yes or no covering people the fort has never seen. The one place
+  the two do meet is `summarise().pending`, which adds them: both are
+  petitions waiting on the same player.
+
+  It must never claim the members it cannot see are anything. Fourteen of
+  Shieldclosed's fifteen troupe members have no loaded unit, so there are no
+  skills to grade and no concerns to raise — `here` is graded normally and
+  the rest are a number, not an assessment.
+
 One module serves the instruments view only:
 
 - `web/js/instruments.js` — the recipe grading. Pure, like the other four:
@@ -843,6 +892,8 @@ real reload after editing JavaScript or CSS.
 | `flow` | `loose` (`total`, `claimed`, `forbidden`, `rotten`, `marked_dump`, `by_type[]` → `type`, `count`, `claimed`, `forbidden`, `rotten`, `levels[]` → `z`, `count`, `x1`/`x2`/`y1`/`y2`), `hauling[]` (`index`, `key`, `raw_key`, `jobs`, `haulers`), `store_jobs` (`total`, `unclaimed`) |
 | `visitors[]` | `id`, `hf_id`, `name` (the face), `real_name` (only when masked), `full_name`, `nickname`, `profession`, `profession_key`, `race`, `sex`, `age`, `status` (`visitor`/`resident`), `uninvited`, `pos`, `arrived_year`, `years_here`, `entity` (`id`/`name`/`type`/`ours`), `groups[]` (same, plus `link`), `occupation` (`type`, `location`), `petition` (`kind`, `year`, `pending`, `agreement_id`), `skills[]`, `values[]` (`key`, `strength`), `identity` (`type`, `name`, `race`, `profession`, `entity`), `intrigue` (`plots[]` → `type`/`on_hold`/`target`, `roles[]`, `master`), `reputations[]` (`entity`, `ours`, `exiled`, `unsolved_murders`, `types[]` → `key`/`level`), `artifact_quest` (`id`, `name`, `ours`), `journey`, `curse` (`hiding`/`undead`/`night_creature`/`bloodsucker`/`opposed_to_life`/`crazed`), `threat` (`danger`/`great_danger`/`invader`/`active_invader`/`invader_origin`/`marauder`), `state` (`dead`/`ghost`/`caged`/`chained`/`tame`) |
 
+| `petitions[]` | Petitions filed by a group rather than a person: `agreement_id`, `kind` (`residency`/`citizenship`), `year`, `pending`, `entity` (`id`/`name`/`type`/`ours`), `members[]` (`hf_id`, `name`, `unit_id` when the figure has one) |
+
 | `instruments` | `types[]` (`id`, `name`, `name_plural`, `description`, `value`, `size`, `skill` + `skill_caption` (the *music* skill), `placed_as_building`, `in_stock`, `pieces[]` → `token`/`name`/`name_plural`/`tool_index`/`dominant`/`reaction`, `reaction` (the assembly, or the whole job for a one-piece instrument)), `foreign[]` (`id`, `name`, `count`) |
 
 | `containers` | `kinds[]` (`key`, `name`, `item_type`, `subtype`, `uses[]`, counts: `total`, `empty`, `free`, `holding`, `contents`, `in_job`, `forbidden`, `marked_dump`, `artifact`, `assigned`, and one location bucket each of `built`/`carried`/`nested`/`stored`/`loose`; plus `holds` (item_type → containers whose top item is that), `materials[]` (`material`, `mat_class`, `count`, `empty`), `piles[]` (`id`, `total`, `empty`), `buildings[]` (`id`, `name`, `kind`, `count`)), `routes[]` (`id`, `name`, `stops`, `carts[]` → `vehicle_id`/`item_id`/`missing`) |
@@ -904,6 +955,15 @@ must tolerate their absence rather than test them for null. `petition` names
 the residency or citizenship agreement they are party to; `pending` is the
 one waiting on the player's answer.
 
+`petitions` is the other half of that: the agreements whose applicant is an
+**entity** rather than a person, which is how a performance troupe asks to
+stay. They are top-level because they belong to no guest — see the visitor
+gotchas above — and `Db#hasPetitions` guards snapshots taken before the
+dumper learned to read them. `members[]` is the whole membership as
+historical figures, most of whom will have no loaded unit; `unit_id` may
+name one that is not on the map, so the join to a real guest goes through
+`hf_id` and `groupPetitions()` in `visitors.js`, never through `unit_id`.
+
 Squad *positions* are all 10 slots whether filled or not; a filled one has
 `unit_id`. Squad *schedules* carry every routine — `cur_routine_idx` picks the
 one actually in force, and a squad can look correctly configured while sitting
@@ -942,9 +1002,11 @@ on an empty routine.
   in mail carrying a battle axe. `unit_equipment()` already reads a
   soldier's kit for the Equipment view, so pointing it at guests is mostly
   wiring.
-- A performance troupe petitions as a group and is accepted as a group, but
-  the view grades each member alone. The troupe is a `PerformanceTroupe`
-  entity in `hf.entity_links`, so the grouping is there to be read.
+- A group petition names its members but the view can only grade the ones
+  on the map. The other fourteen have `unit_id` set on their historical
+  figure and no loaded unit, so their skills are unreadable — which is the
+  honest state, but a troupe's *reputation* is in worldgen and would say
+  something about the members the player cannot see.
 - Nothing watches a visitor across refreshes. An agent's plots move; a
   before-and-after would say which ones are progressing, the way
   `idle_history` does for dwarves.

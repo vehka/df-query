@@ -1553,10 +1553,46 @@ local function visitor_values(unit)
     return out
 end
 
---- hfid -> the residency or citizenship agreement they are party to.
---- `plotinfo.petitions` holds the unapproved ones, which is the closest
---- thing DF has to "waiting on the player's answer"; the accepted ones
---- are what turned a visitor into a resident and carry the year.
+--- The membership of a petitioning group, as figures rather than units.
+--- Most of a troupe is off the map -- Shieldclosed's has 15 members and
+--- one of them in the tavern -- so `unit_id` is what it is on the
+--- historical figure and may name a unit that is not loaded. Deciding who
+--- is actually here is the web side's job, joining on `hf_id` against the
+--- guests it already filtered; the dumper stays a dumb reader.
+local function petition_members(entity)
+    local out = A{}
+    for _, hfid in ipairs(try(function() return entity.histfig_ids end, {})) do
+        local hf = df.historical_figure.find(hfid)
+        if hf then
+            local unit_id = try(function() return hf.unit_id end, -1)
+            out[#out + 1] = {
+                hf_id = hfid,
+                -- People render in their own language, entities in
+                -- translation -- see `name_of`'s two callers below.
+                name = name_of(hf.name, false),
+                unit_id = unit_id >= 0 and unit_id or nil,
+            }
+        end
+    end
+    return out
+end
+
+--- Residency and citizenship agreements at this site, split by who filed
+--- them. `plotinfo.petitions` holds the unapproved ones, which is the
+--- closest thing DF has to "waiting on the player's answer"; the accepted
+--- ones are what turned a visitor into a resident and carry the year.
+---
+--- The applicant party comes in two shapes and only one of them names
+--- people. An individual petitions with `histfig_ids` populated. A
+--- **performance troupe petitions as an entity** -- `histfig_ids` empty,
+--- `entity_ids` holding the troupe -- so a reader that only walks
+--- `histfig_ids` silently drops the whole petition rather than
+--- mis-attributing it. Those come back separately, in `groups`, because a
+--- group petition is not a fact about any one guest: DF is asking about
+--- all fifteen members at once and most of them are not on the map to
+--- attach anything to.
+---
+--- Returns `{units = hfid -> petition, groups = A{group petitions}}`.
 local function petition_map()
     local plotinfo = df.global.plotinfo
     local unapproved = {}
@@ -1565,6 +1601,7 @@ local function petition_map()
     end
 
     local out = {}
+    local groups = A{}
     for _, agreement in ipairs(try(function() return df.global.world.agreements.all end, {})) do
         for _, details in ipairs(agreement.details) do
             local kind, data
@@ -1592,12 +1629,27 @@ local function petition_map()
                                 }
                             end
                         end
+                        if #party.histfig_ids == 0 then
+                            for _, eid in ipairs(party.entity_ids) do
+                                local entity = df.historical_entity.find(eid)
+                                if entity then
+                                    groups[#groups + 1] = {
+                                        kind = kind,
+                                        year = details.year,
+                                        pending = pending and true or false,
+                                        agreement_id = agreement.id,
+                                        entity = entity_brief(eid),
+                                        members = petition_members(entity),
+                                    }
+                                end
+                            end
+                        end
                     end
                 end
             end
         end
     end
-    return out
+    return {units = out, groups = groups}
 end
 
 --- hfid -> the post they hold here, if any. This is the fort's own record
@@ -1624,6 +1676,9 @@ local function occupation_map()
     return out
 end
 
+--- Returns the guest roster and, separately, the petitions filed by a
+--- group rather than by a person -- see `petition_map` for why those
+--- cannot be attached to a guest.
 local function dump_visitors()
     local out = A{}
     local petitions = petition_map()
@@ -1692,7 +1747,7 @@ local function dump_visitors()
                 entity = hf and entity_brief(hf.civ_id) or nil,
                 groups = hf and visitor_groups(hf) or A{},
                 occupation = hf and occupations[hf.id] or nil,
-                petition = hf and petitions[hf.id] or nil,
+                petition = hf and petitions.units[hf.id] or nil,
                 skills = unit_skills(unit),
                 values = visitor_values(unit),
                 identity = identity,
@@ -1738,7 +1793,7 @@ local function dump_visitors()
             }
         end
     end
-    return out
+    return out, petitions.groups
 end
 
 --------------------------------------------------------------------------
@@ -2345,6 +2400,7 @@ local function build_snapshot()
     local site = df.world_site.find(plotinfo.site_id)
     local civ = df.historical_entity.find(plotinfo.civ_id)
     local group = df.historical_entity.find(plotinfo.group_id)
+    local visitors, petitions = dump_visitors()
 
     return {
         meta = {
@@ -2383,7 +2439,10 @@ local function build_snapshot()
         animals = dump_animals(zone_of_unit),
         squads = dump_squads(),
         armory = dump_armory(tile_map),
-        visitors = dump_visitors(),
+        visitors = visitors,
+        -- Petitions filed by a group rather than a person. They have no
+        -- guest to hang off, so they ship alongside the roster.
+        petitions = petitions,
         instruments = dump_instruments(civ),
         containers = {
             kinds = dump_containers(tile_map),

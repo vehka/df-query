@@ -71,6 +71,11 @@ export class Db {
     this.squads = asList(snapshot.squads);
     this.workDetails = asList(snapshot.work_details);
     this.visitors = asList(snapshot.visitors);
+    // Petitions filed by a group rather than a person — a performance
+    // troupe asks for residency as an entity, so there is no guest to hang
+    // the petition off. Absent from snapshots taken before the dumper
+    // learned to read the entity-applicant shape.
+    this.petitions = asList(snapshot.petitions);
     this.idleHistory = snapshot.idle_history || {};
 
     // Absent from snapshots taken before the flow dumper landed; the views
@@ -84,6 +89,7 @@ export class Db {
       && Array.isArray(this.containers.kinds));
     this.hasFlow = Boolean(this.flow && this.flow.loose);
     this.hasVisitors = Array.isArray(snapshot.visitors);
+    this.hasPetitions = Array.isArray(snapshot.petitions);
     this.hasInstruments = Boolean(this.instruments
       && Array.isArray(this.instruments.types));
 
@@ -303,6 +309,7 @@ export class Db {
   visitorInput() {
     return {
       visitors: this.visitors,
+      petitions: this.petitions,
       categoryOf: (key) => {
         const skill = this.skills.get(key);
         return skill ? skill.category : null;

@@ -582,6 +582,52 @@ export function roster(input) {
       || String(a.name).localeCompare(String(b.name)));
 }
 
+// ------------------------------------------------------ group petitions
+
+/**
+ * Petitions filed by a group rather than a person.
+ *
+ * A performance troupe asks for residency **as an entity**: DF puts the
+ * troupe on the agreement's applicant party and leaves the histfig list
+ * empty, so there is no guest to hang the petition off and a reader that
+ * only walks guests drops it entirely. It is also genuinely not a fact
+ * about any one member — DF is asking about the whole troupe at once, and
+ * most of them are not on the map yet to be asked about.
+ *
+ * The join is done here rather than in the dumper because "is this member
+ * actually in the fort" is `presence()`'s question, and that answer lives
+ * in exactly one place. `here` is the members standing in the tavern,
+ * `elsewhere` the count still travelling — the usual split is lopsided
+ * (Shieldclosed's troupe had one of fifteen here when it petitioned), and
+ * saying so is the point: accepting takes in the fourteen you cannot see.
+ */
+export function groupPetitions(input) {
+  const present = new Map();
+  for (const person of roster(input)) {
+    if (person.visitor.hf_id != null) present.set(person.visitor.hf_id, person);
+  }
+
+  return asList(input.petitions).map((petition) => {
+    const members = asList(petition.members);
+    const here = members
+      .map((m) => present.get(m.hf_id))
+      .filter(Boolean);
+    return {
+      petition,
+      entity: petition.entity || null,
+      name: (petition.entity && petition.entity.name) || 'an unnamed group',
+      kind: petition.kind,
+      year: petition.year,
+      pending: Boolean(petition.pending),
+      members,
+      here,
+      elsewhere: members.length - here.length,
+    };
+  }).sort((a, b) => (b.pending - a.pending)
+    || (b.year - a.year)
+    || String(a.name).localeCompare(String(b.name)));
+}
+
 // ----------------------------------------------------------- the verdict
 
 /**
@@ -651,11 +697,33 @@ export function diagnose(input) {
     });
   }
 
+  // Group petitions are separate findings rather than folded into the
+  // count above, because the decision is a different one: it is a single
+  // yes or no covering people the fort cannot see, so the numbers the
+  // player needs are the membership and how much of it is still on the
+  // road, not a per-guest verdict.
+  for (const group of groupPetitions(input).filter((g) => g.pending)) {
+    findings.unshift({
+      severity: 'high',
+      kind: 'pending-group',
+      title: `${group.name} asks for ${group.kind} as a group`,
+      detail: `${plural(group.members.length, 'member')}, `
+        + (group.here.length
+          ? `${group.here.length} in the fort (${group.here.map((p) => p.name).join(', ')})`
+          : 'none of them in the fort yet')
+        + (group.elsewhere
+          ? `; ${group.elsewhere} still travelling. Accepting takes in all of them.`
+          : '.'),
+      names: group.here.map((p) => p.name),
+    });
+  }
+
   return findings.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
 }
 
 export function summarise(input) {
   const people = roster(input);
+  const groups = groupPetitions(input);
   const visitors = people.filter((p) => p.visitor.status === 'visitor');
   const residents = people.filter((p) => p.visitor.status === 'resident');
   // What the presence filter took out, so the view can say so rather than
@@ -669,7 +737,13 @@ export function summarise(input) {
     visitors: visitors.length,
     residents: residents.length,
     absent,
-    pending: people.filter((p) => p.pending).length,
+    // Individual and group petitions are both waiting on the same answer,
+    // so the headline counts them together; `pendingGroups` is the part of
+    // that number no row in the list below accounts for.
+    pending: people.filter((p) => p.pending).length
+      + groups.filter((g) => g.pending).length,
+    pendingGroups: groups.filter((g) => g.pending).length,
+    groupPetitions: groups.length,
     dangerous: people.filter((p) => p.risk === 'danger').length,
     watch: people.filter((p) => p.risk === 'watch').length,
     impostors: people.filter((p) => p.concerns.some((c) => c.kind === 'cover')).length,
