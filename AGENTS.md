@@ -303,6 +303,17 @@ and almost none of it is where you would first look.
 - **A caged beast keeps its visitor flags.** Shieldclosed's cyclops is
   `flags1.caged` and still reads as an uninvited visitor. `chained` and
   `tame` are the neighbouring cases.
+- **So does a forgotten beast the player has never seen.** Shieldclosed's
+  is unit 6549, asleep at z79 in an unbreached cavern, and it is
+  `visitor_uninvited` like any tavern guest — so it arrived in the roster
+  as a live guest and DFHack's `isGreatDanger` promptly announced it. That
+  is the worst spoiler this viewer can print: DF says nothing at all about
+  a forgotten beast until someone digs through to it.
+  `dfhack.units.isHidden` is the game's own test and it is the *only* one
+  that catches this — `flags1.hidden_in_ambush` is false, `isActive` is
+  true, and nothing else in `state` tells it from a bard. It ships as
+  `state.hidden`, and it accounts for sneaking too, so an ambusher is
+  covered by the same field.
 - **A visitor is `flags2.visitor` or `flags2.visitor_uninvited`,** which is
   `dfhack.units.isVisitor`. `isVisiting` is a wider net that also catches
   merchants and diplomats, and those never petition. `visitor_uninvited`
@@ -847,11 +858,24 @@ One module serves the visitors view only:
   concealed curse, a journey and a foreign government's criminal file are
   not.
 
-  Two traps in that gate, both of which leaked before they were closed.
-  A *suppressed count* is still a spoiler — "3 hidden concerns" tells the
-  player exactly what they asked not to be told — so hidden concerns
-  vanish whole and the "false faces" tile is absent rather than zeroed.
-  And `entity`, `groups` and `reputations` all hang off the **real**
+  **`known(input)` is the other half of that, and it gates whole guests
+  rather than concerns.** An undiscovered forgotten beast is a real
+  uninvited visitor standing on a real tile — see the visitor gotchas
+  above — so `presence()` is right to call it present and the filter
+  cannot live there. It goes in front of `roster` and `summarise` instead,
+  dropping any guest with `state.hidden` before the roster, the counts,
+  the findings and the absent note ever see it. That placement is the
+  point: the suppressed-count trap applies here too, and "1 body not
+  listed" gives the beast away as surely as its name, which is why the
+  unit is dropped whole instead of being bucketed the way `presence` does
+  with the dead and the caged. With spoilers on it comes back as an
+  ordinary present guest and grades as one.
+
+  Two more traps in that gate, both of which leaked before they were
+  closed. A *suppressed count* is still a spoiler — "3 hidden concerns"
+  tells the player exactly what they asked not to be told — so hidden
+  concerns vanish whole and the "false faces" tile is absent rather than
+  zeroed. And `entity`, `groups` and `reputations` all hang off the **real**
   figure while DF shows the player the *identity's* civilisation, so for
   a masked guest every tie is hidden knowledge even though the same tie
   on an honest guest is right there on their screen. Hence `masked ||`
@@ -1037,7 +1061,7 @@ real reload after editing JavaScript or CSS.
 | `squads[]` | `id`, `name`, `alias`, `display_name`, `cur_routine_idx`, `positions[]` (`index`, `unit_id`, `name`, `uniform[]` → `category`/`slot`/`type`/`subtype`/`armor_level`/`material_class`/`material`/`assigned`/`assigned_items[]`, `assigned_items` (count), `equipment[]`, `ammo`), `rooms[]` (`name`, `modes[]`), `schedule[]` (routines → `months[]` → `orders[]`) |
 | `armory` | `total`, `free`, `groups[]` (`type`, `subtype`, `slot`, `armor_level`, `material`, `mat_class`, `grade`, `armor_material`, `count`, `claimed`, `worn`, `best_quality`, `stockpiles[]`), `bars[]` (`material`, `grade`, `armor_material`, `count`) |
 | `flow` | `loose` (`total`, `claimed`, `forbidden`, `rotten`, `marked_dump`, `by_type[]` → `type`, `count`, `claimed`, `forbidden`, `rotten`, `levels[]` → `z`, `count`, `x1`/`x2`/`y1`/`y2`), `hauling[]` (`index`, `key`, `raw_key`, `jobs`, `haulers`), `store_jobs` (`total`, `unclaimed`) |
-| `visitors[]` | `id`, `hf_id`, `name` (the face), `real_name` (only when masked), `full_name`, `nickname`, `profession`, `profession_key`, `race`, `sex`, `age`, `status` (`visitor`/`resident`), `uninvited`, `pos`, `arrived_year`, `years_here`, `entity` (`id`/`name`/`type`/`ours`), `groups[]` (same, plus `link`), `occupation` (`type`, `location`), `petition` (`kind`, `year`, `pending`, `agreement_id`), `skills[]`, `values[]` (`key`, `strength`), `identity` (`type`, `name`, `race`, `profession`, `entity`), `intrigue` (`plots[]` → `type`/`on_hold`/`target`, `roles[]`, `master`), `reputations[]` (`entity`, `ours`, `exiled`, `unsolved_murders`, `types[]` → `key`/`level`), `artifact_quest` (`id`, `name`, `ours`), `journey`, `curse` (`hiding`/`undead`/`night_creature`/`bloodsucker`/`opposed_to_life`/`crazed`), `threat` (`danger`/`great_danger`/`invader`/`active_invader`/`invader_origin`/`marauder`), `state` (`dead`/`ghost`/`caged`/`chained`/`tame`) |
+| `visitors[]` | `id`, `hf_id`, `name` (the face), `real_name` (only when masked), `full_name`, `nickname`, `profession`, `profession_key`, `race`, `sex`, `age`, `status` (`visitor`/`resident`), `uninvited`, `pos`, `arrived_year`, `years_here`, `entity` (`id`/`name`/`type`/`ours`), `groups[]` (same, plus `link`), `occupation` (`type`, `location`), `petition` (`kind`, `year`, `pending`, `agreement_id`), `skills[]`, `values[]` (`key`, `strength`), `identity` (`type`, `name`, `race`, `profession`, `entity`), `intrigue` (`plots[]` → `type`/`on_hold`/`target`, `roles[]`, `master`), `reputations[]` (`entity`, `ours`, `exiled`, `unsolved_murders`, `types[]` → `key`/`level`), `artifact_quest` (`id`, `name`, `ours`), `journey`, `curse` (`hiding`/`undead`/`night_creature`/`bloodsucker`/`opposed_to_life`/`crazed`), `threat` (`danger`/`great_danger`/`invader`/`active_invader`/`invader_origin`/`marauder`), `state` (`dead`/`ghost`/`caged`/`chained`/`tame`/`hidden`) |
 
 | `petitions[]` | Petitions filed by a group rather than a person: `agreement_id`, `kind` (`residency`/`citizenship`), `year`, `pending`, `entity` (`id`/`name`/`type`/`ours`), `members[]` (`hf_id`, `name`, `unit_id` when the figure has one) |
 
@@ -1115,10 +1139,12 @@ what `Db#hasFlow` guards. `loose.by_type` is sorted by count and each type's
 `levels` are capped at `LOOSE_LEVEL_CAP`, so it is a summary, not a census.
 
 `visitors` is absent from snapshots taken before the visitors dumper landed,
-which is what `Db#hasVisitors` guards. It ships the dead and the caged along
-with the living — `state` is how they are told apart, and `presence()` in
-`visitors.js` is what filters them, so the dumper stays a dumb reader and the
-judgement stays in one place. It covers guests and long-term residents, not
+which is what `Db#hasVisitors` guards. It ships the dead, the caged and the
+undiscovered along with the living — `state` is how they are told apart, and
+`visitors.js` is what filters them (`presence()` for the first two,
+`known()` for `state.hidden`, which is a spoiler rather than an absence), so
+the dumper stays a dumb reader and the judgement stays in one place. It
+covers guests and long-term residents, not
 citizens — a resident who is granted citizenship leaves this
 list and joins `units`. `identity`, `real_name`, `intrigue`, `artifact_quest`
 and `occupation` are only present when there is something to say, so the view

@@ -2066,6 +2066,13 @@ local function dump_visitors()
                     caged = try(function() return unit.flags1.caged end, false),
                     chained = try(function() return unit.flags1.chained end, false),
                     tame = try(function() return unit.flags1.tame end, false),
+                    -- A forgotten beast asleep in an unbreached cavern is
+                    -- `flags2.visitor_uninvited` like any other uninvited
+                    -- guest, and DF tells the player nothing about it until
+                    -- someone digs through. `isHidden` is the game's own
+                    -- test for that -- it accounts for sneaking too, so an
+                    -- ambusher is covered by the same field.
+                    hidden = try(function() return dfhack.units.isHidden(unit) end, false),
                 },
             }
         end

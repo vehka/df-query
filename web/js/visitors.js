@@ -536,6 +536,28 @@ export function presence(visitor) {
   return 'present';
 }
 
+/**
+ * The guests the player has actually been told about.
+ *
+ * A forgotten beast asleep in an unbreached cavern is an uninvited
+ * visitor by DF's own flags, and it sits in `world.units.active` like
+ * everyone else — but the game says nothing about it until someone digs
+ * through, and naming it in a tavern roster hands over the one fact it is
+ * withholding. So `state.hidden` is a spoiler gate rather than a presence
+ * question: the beast really is on the map, which is why `presence()` is
+ * left alone and the filter goes here instead.
+ *
+ * It is applied before the roster, the counts, the findings and the
+ * absent note, so an undiscovered guest is missing from all of them
+ * together. In particular it must not survive as a number: "1 body not
+ * listed" is the same spoiler as the name, which is why this drops the
+ * unit whole rather than bucketing it the way `presence` does.
+ */
+function known(input) {
+  const all = asList(input.visitors);
+  return input.spoilers ? all : all.filter((v) => !(v.state && v.state.hidden));
+}
+
 /** One guest, fully judged. */
 export function assess(visitor, input) {
   const role = roleOf(visitor, input);
@@ -571,7 +593,7 @@ const RISK_RANK = { danger: 0, watch: 1, clear: 2 };
 const WORTH_RANK = { star: 0, solid: 1, green: 2, novice: 3, none: 4 };
 
 export function roster(input) {
-  return asList(input.visitors)
+  return known(input)
     .filter((visitor) => presence(visitor) === 'present')
     .map((visitor) => assess(visitor, input))
     // Pending petitions first — they are the ones on a clock. Then the
@@ -728,7 +750,7 @@ export function summarise(input) {
   const residents = people.filter((p) => p.visitor.status === 'resident');
   // What the presence filter took out, so the view can say so rather than
   // quietly showing a smaller number than the fort has bodies for.
-  const absent = asList(input.visitors)
+  const absent = known(input)
     .map(presence)
     .filter((p) => p !== 'present')
     .reduce((counts, p) => ({ ...counts, [p]: (counts[p] || 0) + 1 }), {});
