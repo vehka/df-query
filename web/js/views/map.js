@@ -22,14 +22,25 @@ const state = {
   links: true,
   labels: true,
   selected: null,
+  // Where the scroller was left. A level change rebuilds the whole panel,
+  // and without this every step through the fort snaps back to the top-left
+  // corner — which makes ctrl-scroll useless at any zoom worth having.
+  pan: { x: 0, y: 0 },
 };
 
 // Set on every render, so a chip deep in the side panel can move the plan
 // to another level without knowing where the view was mounted.
 let rerender = () => {};
+// Repaint the canvas and the side panel without rebuilding the toolbar.
+// Set on every `draw`, so the key handler can clear a selection.
+let repaint = () => {};
 // One live observer at a time: `draw` runs on every toggle, and an
 // observer per redraw would keep every stale canvas alive.
 let watching = null;
+// One live key handler at a time, for the same reason. The view has no
+// unmount hook — `app.js` just empties the container — so the handler
+// checks whether its own root is still in the document and retires itself.
+let keying = null;
 
 /** Jump here from another view, on the level the building sits on. */
 export function focus(id, z) {
@@ -67,6 +78,32 @@ const PILE_EDGE = '#7fd4d6';
 const SHOP_EDGE = '#d9a441';
 const FULL_EDGE = '#cc6440';
 
+// A link partner on another level. Cool for above, violet for below —
+// neither is any of the colours the plan already spends on terrain, piles,
+// workshops or trouble, so a patch never reads as part of this level.
+const ABOVE_EDGE = '#8ec8f5';
+const BELOW_EDGE = '#c79bef';
+// Tiles of that level's own terrain drawn around the partner. The patch has
+// to be big enough to recognise the place by its shape — a bare outline
+// floating over this level's rock says where, but not where *in the fort*.
+const PATCH_PAD = 5;
+// Past this many off-level partners the patches carpet the plan and say
+// less than the ▲/▼ count already over the building.
+const PATCH_CAP = 8;
+// Clear pixels kept between two windows, so a frame never touches a frame.
+const WINDOW_GAP = 6;
+// Candidate positions carried from one round of the layout to the next.
+const SPOT_KEEP = 24;
+// Below this much displacement a window is near enough its true place that
+// the ghost and the thread back to it would be noise.
+const MOVED_MIN = 10;
+
+const LABEL_FONT = '11px "DejaVu Sans", system-ui, sans-serif';
+const LABEL_LINE = 14;
+const LABEL_PAD = 4;
+const LABEL_MAX = 190;
+const BADGE_R = 7;
+
 const ZOOMS = [
   { value: 0, label: 'fit' },
   { value: 4, label: '4px' },
@@ -101,22 +138,15 @@ export function render(root, db) {
 
   const redraw = () => draw(body, db, map);
 
-  const step = (delta) => {
-    const at = map.levels.findIndex((level) => level.z === state.z);
-    const next = map.levels[at + delta];
-    if (next) {
-      state.z = next.z;
-      rerender();
-    }
-  };
+  listenForKeys(body, map);
 
   toolbar.append(
     h('label', { class: 'field' }, h('span', {}, `Level (${db.elevCaption})`),
       h('div', { class: 'level-pick' },
         h('button', {
-          title: 'Up one level',
+          title: 'Up one level — e, or ctrl-scroll on the plan',
           disabled: map.levels[0].z === state.z,
-          onclick: () => step(-1),
+          onclick: () => step(map, -1),
         }, '▲'),
         h('select', {
           onchange: (e) => { state.z = Number(e.target.value); rerender(); },
@@ -126,9 +156,9 @@ export function render(root, db) {
           title: `${plural(level.buildings, 'building')} in all, beds and doors included`,
         }, `${db.elevShort(level.z)} · ${level.nodes ? `${level.nodes} piles + shops` : 'nothing stored'}`))),
         h('button', {
-          title: 'Down one level',
+          title: 'Down one level — c, or ctrl-scroll on the plan',
           disabled: map.levels[map.levels.length - 1].z === state.z,
-          onclick: () => step(1),
+          onclick: () => step(map, 1),
         }, '▼'))),
     // Redrawing the plan does not rebuild the toolbar, so these have to
     // restate which of them is on. Marking the class at build time only
@@ -154,7 +184,11 @@ export function render(root, db) {
         checked: state.links,
         onchange: (e) => { state.links = e.target.checked; redraw(); },
       }),
-      h('span', {}, 'Links')),
+      h('span', {
+        title: 'Arrows between linked buildings on this level, and — when one'
+          + ' is selected — a window onto the level each off-level partner'
+          + ' sits on',
+      }, 'Links')),
     h('label', { class: 'field check' },
       h('input', {
         type: 'checkbox',
@@ -162,9 +196,63 @@ export function render(root, db) {
         onchange: (e) => { state.labels = e.target.checked; redraw(); },
       }),
       h('span', {}, 'Labels')),
+    h('span', { class: 'field muted small' },
+      h('span', {}, 'ctrl-scroll, e / c, or < / > to change level'),
+      h('span', {}, 'click a pile or shop to trace its links · esc clears')),
   );
 
   redraw();
+}
+
+/** Move `delta` entries through the level list — negative is up. */
+function step(map, delta) {
+  const at = map.levels.findIndex((level) => level.z === state.z);
+  const next = map.levels[at + delta];
+  if (!next) return;
+  state.z = next.z;
+  rerender();
+}
+
+/**
+ * DF's own level keys, on the window rather than the canvas.
+ *
+ * A canvas cannot take focus without a tabindex, and a plan you have to
+ * click before the keys work is a plan whose keys nobody finds. The cost is
+ * a listener outliving the view, which is what the `isConnected` check is
+ * for — `app.js` empties the container and never tells anyone.
+ *
+ * The thing it watches has to be an element this view made. `app.js` hands
+ * every view the same container and only empties it, so a container that is
+ * still in the document says nothing about which view is on screen — and a
+ * map that keeps stepping levels while you are reading the Skills table is
+ * what that mistake looks like.
+ */
+function listenForKeys(body, map) {
+  if (keying) window.removeEventListener('keydown', keying);
+  keying = (event) => {
+    if (!body.isConnected) {
+      window.removeEventListener('keydown', keying);
+      keying = null;
+      return;
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const target = event.target;
+    // Never eat a keystroke meant for a filter box or the level select's
+    // own type-ahead. A button is not on that list: clicking ▲ leaves the
+    // focus on it, and keys that stop working after one click would be
+    // worse than no keys at all.
+    if (target && (target.isContentEditable
+      || /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName))) return;
+
+    if (event.key === 'e' || event.key === '<') step(map, -1);
+    else if (event.key === 'c' || event.key === '>') step(map, 1);
+    else if (event.key === 'Escape' && state.selected !== null) {
+      state.selected = null;
+      repaint();
+    } else return;
+    event.preventDefault();
+  };
+  window.addEventListener('keydown', keying);
 }
 
 function zoomButtons(redraw) {
@@ -192,6 +280,17 @@ function draw(body, db, map) {
   const reach = reachability(map, level);
   const stats = summariseLevel(map, level);
 
+  // Footprints for the levels a link reaches onto, worked out once per
+  // level and only when something asks. Most selections touch one or two.
+  const printCache = new Map([[level.z, prints]]);
+  const printsAt = (z) => {
+    if (!printCache.has(z)) {
+      const other = map.levelAt(z);
+      printCache.set(z, other ? footprints(map, other) : new Map());
+    }
+    return printCache.get(z);
+  };
+
   body.append(headline(db, map, level, stats, reach, prints));
 
   const canvas = h('canvas', { class: 'plan' });
@@ -206,12 +305,31 @@ function draw(body, db, map) {
   // the fit zoom is a function of the space it actually got.
   const paint = () => {
     const scale = tileSize(scroller, map);
-    paintPlan(canvas, db, map, level, below, prints, reach, scale);
+    paintPlan(canvas, db, map, level, below, prints, printsAt, reach, scale);
   };
   paint();
   if (watching) watching.disconnect();
   watching = new ResizeObserver(() => { if (!state.tile) paint(); });
   watching.observe(scroller);
+
+  repaint = () => { paint(); drawSide(side, db, level, prints, reach); };
+
+  // A level change rebuilds this element, so the scroll position has to be
+  // carried over by hand or every step lands back at the top-left corner.
+  scroller.scrollLeft = state.pan.x;
+  scroller.scrollTop = state.pan.y;
+  scroller.addEventListener('scroll', () => {
+    state.pan = { x: scroller.scrollLeft, y: scroller.scrollTop };
+  });
+
+  // Ctrl-scroll changes level, the way DF's own map does. The listener has
+  // to be non-passive: without `preventDefault` the browser reads it as a
+  // page zoom and the fort comes out twice the size instead.
+  scroller.addEventListener('wheel', (event) => {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    if (wheelStep(event.deltaY)) step(map, event.deltaY > 0 ? 1 : -1);
+  }, { passive: false });
 
   const locate = (event) => {
     const scale = tileSize(scroller, map);
@@ -250,6 +368,22 @@ function draw(body, db, map) {
   drawSide(side, db, level, prints, reach);
 }
 
+// One mouse notch is 100-ish pixels of delta and one trackpad flick is a
+// dozen events of three, so a level per event would either crawl or fly.
+// Accumulate instead, and reset on a change of direction so a reversal
+// starts from scratch rather than from whatever was left over.
+const WHEEL_STEP = 45;
+let wheelAcc = 0;
+
+function wheelStep(delta) {
+  if (delta === 0) return false;
+  if (Math.sign(delta) !== Math.sign(wheelAcc)) wheelAcc = 0;
+  wheelAcc += delta;
+  if (Math.abs(wheelAcc) < WHEEL_STEP) return false;
+  wheelAcc = 0;
+  return true;
+}
+
 /** Pixels per tile: whatever the panel can give, or the pinned size. */
 function tileSize(scroller, map) {
   if (state.tile) return state.tile;
@@ -259,7 +393,7 @@ function tileSize(scroller, map) {
 
 // -------------------------------------------------------------- the canvas
 
-function paintPlan(canvas, db, map, level, below, prints, reach, scale) {
+function paintPlan(canvas, db, map, level, below, prints, printsAt, reach, scale) {
   const width = map.width * scale;
   const height = map.height * scale;
   const ratio = window.devicePixelRatio || 1;
@@ -278,6 +412,8 @@ function paintPlan(canvas, db, map, level, below, prints, reach, scale) {
   paintOutlines(ctx, db, map, level, prints, reach, scale);
   if (state.links) paintLinks(ctx, db, map, level, prints, scale);
   if (state.labels && scale >= 5) paintLabels(ctx, db, prints, map, scale);
+  // Last, because it is a layer over this level rather than part of it.
+  if (state.links) paintOffLevel(ctx, db, map, level, prints, printsAt, scale);
 }
 
 /** Colour per tile *code*, resolved once against the snapshot's legend. */
@@ -287,9 +423,20 @@ function palette(map) {
   return out;
 }
 
-function paintTerrain(ctx, map, level, scale, alpha) {
+/**
+ * Terrain, optionally clipped to one window of the box.
+ *
+ * `area` is in grid coordinates — indices into the plan's box, not map
+ * coordinates — because that is what the fill loop and the owner mask both
+ * work in. Absent, it paints the whole level.
+ */
+function paintTerrain(ctx, map, level, scale, alpha, area) {
   ctx.globalAlpha = alpha;
-  const { width } = map;
+  const { width, height } = map;
+  const gx1 = area ? area.gx1 : 0;
+  const gx2 = area ? area.gx2 : width - 1;
+  const gy1 = area ? area.gy1 : 0;
+  const gy2 = area ? area.gy2 : height - 1;
   const colours = palette(map);
   // One pass per colour: a dozen fillStyle changes for ten thousand tiles
   // rather than ten thousand, which is the difference between a smooth
@@ -297,10 +444,12 @@ function paintTerrain(ctx, map, level, scale, alpha) {
   for (let code = 0; code < colours.length; code += 1) {
     if (!colours[code]) continue;
     ctx.fillStyle = colours[code];
-    for (let at = 0; at < level.terrain.length; at += 1) {
-      if (level.terrain[at] !== code) continue;
-      const cx = at % width;
-      ctx.fillRect(cx * scale, ((at - cx) / width) * scale, scale, scale);
+    for (let gy = gy1; gy <= gy2; gy += 1) {
+      const row = gy * width;
+      for (let gx = gx1; gx <= gx2; gx += 1) {
+        if (level.terrain[row + gx] !== code) continue;
+        ctx.fillRect(gx * scale, gy * scale, scale, scale);
+      }
     }
   }
   ctx.globalAlpha = 1;
@@ -326,7 +475,6 @@ function paintOwners(ctx, db, map, level, scale) {
  * box is precisely the lie this view exists to stop telling.
  */
 function paintOutlines(ctx, db, map, level, prints, reach, scale) {
-  const { width, height } = map;
   ctx.lineWidth = Math.max(1, scale >= 8 ? 1.5 : 1);
 
   for (const [id, print] of prints) {
@@ -339,28 +487,34 @@ function paintOutlines(ctx, db, map, level, prints, reach, scale) {
     ctx.strokeStyle = selected ? '#fff6e2' : colour;
     ctx.lineWidth = selected ? 2.5 : ctx.lineWidth;
 
-    ctx.beginPath();
-    for (const at of print.tiles) {
-      const cx = at % width;
-      const cy = (at - cx) / width;
-      const px = cx * scale;
-      const py = cy * scale;
-      // Only the edges that face a tile this building does not own.
-      if (cy === 0 || level.owner[at - width] !== id) {
-        ctx.moveTo(px, py); ctx.lineTo(px + scale, py);
-      }
-      if (cy === height - 1 || level.owner[at + width] !== id) {
-        ctx.moveTo(px, py + scale); ctx.lineTo(px + scale, py + scale);
-      }
-      if (cx === 0 || level.owner[at - 1] !== id) {
-        ctx.moveTo(px, py); ctx.lineTo(px, py + scale);
-      }
-      if (cx === width - 1 || level.owner[at + 1] !== id) {
-        ctx.moveTo(px + scale, py); ctx.lineTo(px + scale, py + scale);
-      }
-    }
+    tracePrint(ctx, map, level.owner, id, print, scale);
     ctx.stroke();
     ctx.lineWidth = Math.max(1, scale >= 8 ? 1.5 : 1);
+  }
+}
+
+/** The outline path around one building's tiles, ready to stroke. */
+function tracePrint(ctx, map, owner, id, print, scale) {
+  const { width, height } = map;
+  ctx.beginPath();
+  for (const at of print.tiles) {
+    const cx = at % width;
+    const cy = (at - cx) / width;
+    const px = cx * scale;
+    const py = cy * scale;
+    // Only the edges that face a tile this building does not own.
+    if (cy === 0 || owner[at - width] !== id) {
+      ctx.moveTo(px, py); ctx.lineTo(px + scale, py);
+    }
+    if (cy === height - 1 || owner[at + width] !== id) {
+      ctx.moveTo(px, py + scale); ctx.lineTo(px + scale, py + scale);
+    }
+    if (cx === 0 || owner[at - 1] !== id) {
+      ctx.moveTo(px, py); ctx.lineTo(px, py + scale);
+    }
+    if (cx === width - 1 || owner[at + 1] !== id) {
+      ctx.moveTo(px + scale, py); ctx.lineTo(px + scale, py + scale);
+    }
   }
 }
 
@@ -437,6 +591,492 @@ function arrowHead(ctx, a, b, size) {
   ctx.lineTo(tipX + Math.sin(angle) * size * 0.4, tipY - Math.cos(angle) * size * 0.4);
   ctx.closePath();
   ctx.fill();
+}
+
+/**
+ * Where a selected building's off-level partners are, drawn in place.
+ *
+ * A link that leaves the level is the one thing a one-level plan cannot
+ * show, and a count over the building — which is all it had — says how many
+ * without saying where. So each partner gets a window onto its own level:
+ * that level's terrain, in the same map coordinates as everything else, big
+ * enough (`PATCH_PAD`) that the shape around it is recognisable as a place
+ * in the fort rather than an outline floating in rock.
+ *
+ * It is a window, not a merge. The patch is a layer *over* this level with
+ * its own dashed frame and its own colour per direction, because the tiles
+ * inside it are somewhere the dwarf standing here cannot walk to — the plan
+ * would be lying if the two blended.
+ *
+ * Windows from different levels can want the same pixels, and stacked they
+ * are worth less than either alone. `layOut` keeps each one where it really
+ * is when that spot is free and moves it the shortest way that clears the
+ * others when it is not; a window that moved draws its buildings' true
+ * extents and a thread back to them, so the plan never quietly relocates a
+ * pile.
+ */
+function paintOffLevel(ctx, db, map, level, prints, printsAt, scale) {
+  const anchor = state.selected && prints.get(state.selected);
+  if (!anchor) return;
+
+  const { inbound, outbound } = db.linksOf(state.selected);
+  const seen = new Set();
+  const partners = [];
+  for (const [links, dir, pick] of [
+    [outbound, 'out', (l) => l.to], [inbound, 'in', (l) => l.from]]) {
+    for (const link of links) {
+      const id = pick(link);
+      if (seen.has(id)) continue;
+      const node = db.nodeById.get(id);
+      if (!node || node.z === level.z) continue;
+      const other = map.levelAt(node.z);
+      const print = other ? printsAt(node.z).get(id) : null;
+      const area = patchArea(map, node, print);
+      if (!area) continue;
+      seen.add(id);
+      partners.push({ node, dir, other, print, area });
+    }
+  }
+  if (!partners.length) return;
+
+  const from = {
+    x: (anchor.cx - map.x1) * scale,
+    y: (anchor.cy - map.y1) * scale,
+  };
+  const centre = (partner) => (partner.print
+    ? { x: (partner.print.cx - map.x1) * scale, y: (partner.print.cy - map.y1) * scale }
+    : {
+      x: ((partner.area.gx1 + partner.area.gx2 + 1) / 2) * scale,
+      y: ((partner.area.gy1 + partner.area.gy2 + 1) / 2) * scale,
+    });
+  const reach = (partner) => {
+    const at = centre(partner);
+    return Math.hypot(at.x - from.x, at.y - from.y);
+  };
+  // Nearest first, so the cap keeps the partners a reader can place.
+  partners.sort((a, b) => reach(a) - reach(b));
+  const shown = partners.slice(0, PATCH_CAP);
+
+  // One window per level, not per building. Two partners on the same floor
+  // that fall in each other's padding merge into a single window, because
+  // that is one continuous piece of that floor and drawing it as two
+  // overlapping frames invents a seam the fort does not have.
+  const byLevel = new Map();
+  for (const partner of shown) {
+    if (!byLevel.has(partner.node.z)) byLevel.set(partner.node.z, []);
+    byLevel.get(partner.node.z).push(partner);
+  }
+  const windows = [];
+  for (const [z, group] of byLevel) {
+    for (const win of mergeAreas(group)) {
+      windows.push({
+        ...win,
+        z,
+        colour: z > level.z ? ABOVE_EDGE : BELOW_EDGE,
+        other: map.levelAt(z),
+        box: pixels(win, scale),
+        label: labelBlock(ctx, db, win, z, level.z),
+      });
+    }
+  }
+
+  // Windows keep their true place when they can and are moved when they
+  // cannot. Nearest level first, so the floor just under your feet is the
+  // one that stays put and the far ones give way.
+  windows.sort((a, b) => Math.abs(a.z - level.z) - Math.abs(b.z - level.z));
+  layOut(windows, map.width * scale, map.height * scale, anchorGuard(anchor, map, scale));
+
+  // Furthest first, so a nearer floor is the one on top wherever the layout
+  // could not pull two windows fully apart.
+  const drawn = [...windows]
+    .sort((a, b) => Math.abs(b.z - level.z) - Math.abs(a.z - level.z));
+
+  for (const win of drawn) {
+    const { box, colour, dx, dy } = win;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(box.x + dx, box.y + dy, box.w, box.h);
+    ctx.clip();
+    // Push this level back rather than paint it out. The other floor's
+    // tiles go on at full strength on top, so nothing reads as a blend;
+    // what survives underneath shows through the window's *undiscovered*
+    // tiles, which the plan draws as nothing on every level — and a
+    // window with no landmark left in it is one nobody can place.
+    ctx.fillStyle = 'rgba(6, 6, 8, 0.78)';
+    ctx.fillRect(box.x + dx, box.y + dy, box.w, box.h);
+    ctx.translate(dx, dy);
+    if (win.other) paintTerrain(ctx, map, win.other, scale, 1, win);
+    for (const partner of win.members) paintPartner(ctx, map, partner, colour, scale);
+    if (win.members.length > 1) {
+      // Which one is which. The same numbers head the window's own list, so
+      // a window holding four piles is still four named piles.
+      win.members.forEach((partner, at) => {
+        const spot = centre(partner);
+        badge(ctx, spot.x, spot.y, at + 1, colour, Math.max(5, Math.min(BADGE_R, scale)));
+      });
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.setLineDash([5, 3]);
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = 1.4;
+    ctx.strokeRect(box.x + dx + 0.5, box.y + dy + 0.5, box.w - 1, box.h - 1);
+    ctx.restore();
+  }
+
+  // A window that had to move says where it really is: its buildings' true
+  // extents, and a thread back to them. Without this the plan would be
+  // quietly drawing a pile somewhere it is not.
+  ctx.save();
+  for (const win of drawn) {
+    if (Math.hypot(win.dx, win.dy) < MOVED_MIN) continue;
+    ctx.strokeStyle = win.colour;
+    ctx.globalAlpha = 0.75;
+    ctx.setLineDash([2, 3]);
+    ctx.lineWidth = 1;
+    for (const partner of win.members) {
+      const spot = extent(partner, map, scale);
+      ctx.strokeRect(spot.x, spot.y, spot.w, spot.h);
+    }
+    const home = { x: win.box.x + win.box.w / 2, y: win.box.y + win.box.h / 2 };
+    const moved = { x: home.x + win.dx, y: home.y + win.dy };
+    ctx.setLineDash([1, 4]);
+    ctx.beginPath();
+    ctx.moveTo(home.x, home.y);
+    const edge = entryPoint(home, moved, {
+      x: win.box.x + win.dx, y: win.box.y + win.dy, w: win.box.w, h: win.box.h,
+    });
+    ctx.lineTo(edge.x, edge.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Connectors over every window, so a line into the far one is not buried
+  // under the near one. They run to where the partner really is, not to
+  // where its window was put. The head sits on the end goods arrive at.
+  ctx.save();
+  ctx.setLineDash([5, 3]);
+  ctx.lineWidth = 1.6;
+  for (const partner of shown) {
+    const colour = partner.node.z > level.z ? ABOVE_EDGE : BELOW_EDGE;
+    const to = centre(partner);
+    ctx.strokeStyle = colour;
+    ctx.fillStyle = colour;
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+    ctx.save();
+    ctx.setLineDash([]);
+    const head = Math.max(6, scale * 0.8);
+    if (partner.dir === 'out') arrowHead(ctx, from, to, head);
+    else arrowHead(ctx, to, from, head);
+    ctx.restore();
+  }
+  ctx.restore();
+
+  // The building you clicked, restated: a window can land on top of it, and
+  // a trace whose own starting point is buried is hard to read.
+  ctx.strokeStyle = '#fff6e2';
+  ctx.lineWidth = 2.5;
+  tracePrint(ctx, map, level.owner, state.selected, anchor, scale);
+  ctx.stroke();
+
+  // Last of all, over every window: the layout already kept them apart.
+  for (const win of drawn) drawLabel(ctx, win);
+}
+
+/** Keep windows off the building you clicked. */
+function anchorGuard(anchor, map, scale) {
+  return {
+    x: (anchor.x1 - map.x1) * scale,
+    y: (anchor.y1 - map.y1) * scale,
+    w: (anchor.x2 - anchor.x1 + 1) * scale,
+    h: (anchor.y2 - anchor.y1 + 1) * scale,
+  };
+}
+
+/** One partner's true extent on the plan, in pixels. */
+function extent(partner, map, scale) {
+  const { print, node } = partner;
+  const box = print
+    ? { x1: print.x1, y1: print.y1, x2: print.x2, y2: print.y2 }
+    : {
+      x1: node.x1, y1: node.y1, x2: node.x2, y2: node.y2,
+    };
+  return {
+    x: (box.x1 - map.x1) * scale,
+    y: (box.y1 - map.y1) * scale,
+    w: (box.x2 - box.x1 + 1) * scale,
+    h: (box.y2 - box.y1 + 1) * scale,
+  };
+}
+
+/** One partner's tiles inside its window: tinted, then outlined. */
+function paintPartner(ctx, map, partner, colour, scale) {
+  const { node, print, other } = partner;
+  if (other && print) {
+    ctx.fillStyle = node.node === 'workshop' ? SHOP_TINT : PILE_TINT;
+    for (const at of print.tiles) {
+      const cx = at % map.width;
+      ctx.fillRect(cx * scale, ((at - cx) / map.width) * scale, scale, scale);
+    }
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = scale >= 8 ? 2 : 1.5;
+    tracePrint(ctx, map, other.owner, node.id, print, scale);
+    ctx.stroke();
+    return;
+  }
+  // The plan has no level there — only the levels with something built on
+  // them are dumped. The bounding box is all this can honestly show.
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(
+    (node.x1 - map.x1) * scale, (node.y1 - map.y1) * scale,
+    (node.x2 - node.x1 + 1) * scale, (node.y2 - node.y1 + 1) * scale);
+}
+
+/** Grid rect → canvas pixels. */
+function pixels(area, scale) {
+  return {
+    x: area.gx1 * scale,
+    y: area.gy1 * scale,
+    w: (area.gx2 - area.gx1 + 1) * scale,
+    h: (area.gy2 - area.gy1 + 1) * scale,
+  };
+}
+
+/**
+ * Fold a level's partner windows into disjoint ones.
+ *
+ * Two that touch or overlap become the box around both, repeatedly, until
+ * none of them meet. They show the same floor, so a merged window is the
+ * same picture with one frame instead of two crossing ones.
+ */
+function mergeAreas(partners) {
+  const out = partners.map((partner) => ({ ...partner.area, members: [partner] }));
+  for (let merged = true; merged;) {
+    merged = false;
+    search:
+    for (let i = 0; i < out.length; i += 1) {
+      for (let j = i + 1; j < out.length; j += 1) {
+        const a = out[i];
+        const b = out[j];
+        if (a.gx1 > b.gx2 + 1 || b.gx1 > a.gx2 + 1) continue;
+        if (a.gy1 > b.gy2 + 1 || b.gy1 > a.gy2 + 1) continue;
+        out[i] = {
+          gx1: Math.min(a.gx1, b.gx1),
+          gy1: Math.min(a.gy1, b.gy1),
+          gx2: Math.max(a.gx2, b.gx2),
+          gy2: Math.max(a.gy2, b.gy2),
+          members: [...a.members, ...b.members],
+        };
+        out.splice(j, 1);
+        merged = true;
+        break search;
+      }
+    }
+  }
+  return out;
+}
+
+/** The window of the box to draw for one off-level partner, in grid coords. */
+function patchArea(map, node, print) {
+  const box = print
+    ? { x1: print.x1, y1: print.y1, x2: print.x2, y2: print.y2 }
+    : {
+      x1: node.x1, y1: node.y1, x2: node.x2, y2: node.y2,
+    };
+  if (![box.x1, box.y1, box.x2, box.y2].every(Number.isFinite)) return null;
+  const clamp = (v, hi) => Math.max(0, Math.min(hi, v));
+  return {
+    gx1: clamp(box.x1 - map.x1 - PATCH_PAD, map.width - 1),
+    gy1: clamp(box.y1 - map.y1 - PATCH_PAD, map.height - 1),
+    gx2: clamp(box.x2 - map.x1 + PATCH_PAD, map.width - 1),
+    gy2: clamp(box.y2 - map.y1 + PATCH_PAD, map.height - 1),
+  };
+}
+
+/**
+ * The tag on one window: which floor it is, and every building in it.
+ *
+ * One line each, never a joined-up list: a window holding four piles used to
+ * name them in one strip that ran off its own end, which is the same as not
+ * naming them. The numbers match the badges drawn on the plan.
+ */
+function labelBlock(ctx, db, win, z, levelZ) {
+  ctx.font = LABEL_FONT;
+  const arrow = z > levelZ ? '▲' : '▼';
+  const lines = win.members.length === 1
+    ? [{ text: `${arrow} ${db.elevLabel(z)} · ${win.members[0].node.name}` }]
+    : [
+      { text: `${arrow} ${db.elevLabel(z)}` },
+      ...win.members.map((partner, at) => ({
+        badge: at + 1,
+        text: fit(ctx, partner.node.name, LABEL_MAX) || partner.node.name,
+      })),
+    ];
+  const width = Math.max(...lines.map((line) =>
+    ctx.measureText(line.text).width + (line.badge ? BADGE_R * 2 + 3 : 0)));
+  return {
+    lines,
+    w: Math.ceil(width) + LABEL_PAD * 2,
+    h: lines.length * LABEL_LINE + LABEL_PAD * 2,
+  };
+}
+
+function drawLabel(ctx, win) {
+  const { label, colour } = win;
+  const x = win.box.x + win.dx;
+  const y = win.box.y + win.dy - label.h;
+  ctx.save();
+  ctx.fillStyle = 'rgba(10, 9, 7, 0.92)';
+  ctx.fillRect(x, y, label.w, label.h);
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, label.w - 1, label.h - 1);
+  ctx.font = LABEL_FONT;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  let row = y + LABEL_PAD;
+  for (const line of label.lines) {
+    if (line.badge) {
+      badge(ctx, x + LABEL_PAD + BADGE_R, row + LABEL_LINE / 2, line.badge, colour);
+      ctx.fillStyle = '#e8e0d0';
+      ctx.fillText(line.text, x + LABEL_PAD + BADGE_R * 2 + 3, row);
+    } else {
+      ctx.fillStyle = colour;
+      ctx.fillText(line.text, x + LABEL_PAD, row);
+    }
+    row += LABEL_LINE;
+  }
+  ctx.restore();
+}
+
+/**
+ * A numbered disc, on the plan and in the window's own list.
+ *
+ * On the plan it shrinks with the tile size — at 4px a fixed disc is wider
+ * than the pile it is naming.
+ */
+function badge(ctx, x, y, number, colour, radius = BADGE_R) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = colour;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(10, 9, 7, 0.9)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = '#100f0d';
+  ctx.font = `bold ${BADGE_R + 2}px "DejaVu Sans", system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(number), x, y);
+  ctx.restore();
+}
+
+/**
+ * Put the windows down so none of them covers another.
+ *
+ * Each keeps its true position when that position is free — which is the
+ * whole point of drawing them in map space — and is moved the shortest way
+ * that clears everything already placed when it is not. `keepClear` is the
+ * building you clicked, which no window may sit on.
+ *
+ * A window's box includes its label, so the tags cannot collide either.
+ */
+function layOut(windows, canvasW, canvasH, keepClear) {
+  const placed = keepClear ? [keepClear] : [];
+  for (const win of windows) {
+    const want = {
+      x: win.box.x,
+      y: win.box.y - win.label.h,
+      w: Math.max(win.box.w, win.label.w),
+      h: win.box.h + win.label.h,
+    };
+    const spot = findSpot(want, placed, canvasW, canvasH);
+    win.dx = spot.x - want.x;
+    win.dy = spot.y - want.y;
+    placed.push({ ...want, x: spot.x, y: spot.y });
+  }
+}
+
+/**
+ * The free position nearest the one asked for.
+ *
+ * Candidates are generated by pushing the box clear of each obstacle in turn
+ * along one axis, then pushing those results clear again — a handful of
+ * rounds is enough for the eight windows this view can draw, and the nearest
+ * free candidate wins so a window that has to move barely moves.
+ *
+ * Each round multiplies the frontier by four per obstacle, so it is cut back
+ * to the `SPOT_KEEP` nearest survivors. Without that, a plan with no room
+ * left on it reaches the last round with a million candidates and takes the
+ * whole tab down with it.
+ */
+function findSpot(want, placed, canvasW, canvasH) {
+  const inside = (x, y) => ({
+    x: Math.max(0, Math.min(x, canvasW - want.w)),
+    y: Math.max(0, Math.min(y, canvasH - want.h)),
+  });
+  const hits = (spot) => placed.some((p) =>
+    spot.x < p.x + p.w + WINDOW_GAP && p.x < spot.x + want.w + WINDOW_GAP
+    && spot.y < p.y + p.h + WINDOW_GAP && p.y < spot.y + want.h + WINDOW_GAP);
+  const gone = (spot) => Math.hypot(spot.x - want.x, spot.y - want.y);
+
+  let best = null;
+  const seen = new Set();
+  let frontier = [inside(want.x, want.y)];
+  for (let round = 0; round < 4 && !best; round += 1) {
+    const next = [];
+    const push = (spot) => {
+      const key = `${Math.round(spot.x)},${Math.round(spot.y)}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      next.push(spot);
+    };
+    for (const spot of frontier) {
+      if (!hits(spot)) {
+        if (!best || gone(spot) < best.gone) best = { ...spot, gone: gone(spot) };
+        continue;
+      }
+      for (const p of placed) {
+        push(inside(p.x - want.w - WINDOW_GAP, spot.y));
+        push(inside(p.x + p.w + WINDOW_GAP, spot.y));
+        push(inside(spot.x, p.y - want.h - WINDOW_GAP));
+        push(inside(spot.x, p.y + p.h + WINDOW_GAP));
+      }
+    }
+    next.sort((a, b) => gone(a) - gone(b));
+    frontier = next.slice(0, SPOT_KEEP);
+  }
+  // Nowhere clear — the plan is smaller than the windows want. Overlapping
+  // in the right place beats not being drawn.
+  return best || inside(want.x, want.y);
+}
+
+/** Where a line from `from` to `to` first meets `rect`, or `to`. */
+function entryPoint(from, to, rect) {
+  const at = (t) => ({
+    x: from.x + (to.x - from.x) * t,
+    y: from.y + (to.y - from.y) * t,
+  });
+  const within = (t) => {
+    const spot = at(t);
+    return spot.x >= rect.x && spot.x <= rect.x + rect.w
+      && spot.y >= rect.y && spot.y <= rect.y + rect.h;
+  };
+  if (!within(1)) return to;
+  let out = 0;
+  let hit = 1;
+  for (let step = 0; step < 20; step += 1) {
+    const mid = (out + hit) / 2;
+    if (within(mid)) hit = mid;
+    else out = mid;
+  }
+  return at(out);
 }
 
 function paintLabels(ctx, db, prints, map, scale) {
@@ -551,7 +1191,13 @@ function legend(db, map, level, stats) {
         'workshop'),
       h('span', { class: 'swatch' },
         h('i', { style: `border-color:${FULL_EDGE}` }),
-        'full, or on floor with no way off')),
+        'full, or on floor with no way off'),
+      h('span', { class: 'swatch', title: 'Shown when you select a building that links off this level' },
+        h('i', { style: `border-color:${ABOVE_EDGE}` }),
+        'link partner above'),
+      h('span', { class: 'swatch', title: 'Shown when you select a building that links off this level' },
+        h('i', { style: `border-color:${BELOW_EDGE}` }),
+        'link partner below')),
     h('p', { class: 'muted small' },
       'Undiscovered rock is left blank — DF hides it from you, so the plan'
       + ' does too. '
@@ -619,6 +1265,10 @@ function drawSide(side, db, level, prints, reach) {
 
 function linkList(db, level, title, links, pick) {
   if (!links.length) return h('div', {});
+  const away = links.filter((link) => {
+    const other = db.nodeById.get(pick(link));
+    return other && other.z !== level.z;
+  }).length;
   return h('div', { class: 'plan-links' },
     h('h4', {}, title),
     h('div', { class: 'chips' }, links.map((link) => {
@@ -627,12 +1277,17 @@ function linkList(db, level, title, links, pick) {
       const here = other.z === level.z;
       return h('button', {
         class: `chip ${other.node}`,
-        title: here ? 'On this level' : 'Jump to its level',
+        title: here ? 'On this level' : 'Outlined on the plan — click to go there',
         onclick: () => {
           state.selected = other.id;
           state.z = other.z;
           rerender();
         },
-      }, other.name, h('em', {}, ` ${db.elevLabel(other.z)}`));
-    })));
+      },
+      here ? '' : (other.z > level.z ? '▲ ' : '▼ '),
+      other.name, h('em', {}, ` ${db.elevLabel(other.z)}`));
+    })),
+    away ? h('p', { class: 'muted small' },
+      `${plural(away, 'partner')} on another level, drawn on the plan as a`
+      + ' window onto the floor it sits on.') : null);
 }

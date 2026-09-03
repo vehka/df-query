@@ -615,6 +615,52 @@ lands in 2–17 ms per level; if that starts creeping, `paintTerrain`'s
 one-pass-per-colour loop is the thing to keep, since it is what holds
 `fillStyle` changes down to a dozen for the whole plan.
 
+Three things about it are less obvious than they look:
+
+- **Selecting a building opens a window onto every level its links reach,
+  and a window is not a merge.** 45 of Shieldclosed's 49 links leave the
+  level, so a one-level plan that answers them with a ▲/▼ count answers
+  almost nothing. Each off-level partner is drawn in the same map
+  coordinates as everything else, inside its own dashed frame and coloured
+  by direction — and frames are merged **per level** (`mergeAreas`), never
+  per building, because two piles on one floor that fall inside each
+  other's padding are one continuous piece of that floor and two crossing
+  frames invent a seam the fort does not have. The backdrop dims this level
+  rather than painting it out: the other floor's tiles go on at full
+  strength on top, so nothing reads as a blend, and what shows through the
+  window's *undiscovered* tiles is the only landmark left to place it by.
+  Connectors and the selected building's own outline are re-drawn over
+  every window, because a trace whose ends are buried is not a trace.
+- **Two windows stacked are worth less than either alone**, which is what
+  drawing every one at its true position produced. `layOut` keeps a window
+  where it really is when that spot is free — nearest level first, so the
+  floor under your feet is the one that never moves — and otherwise shifts
+  it the shortest way that clears everything already placed, the selected
+  building included. A window that moved draws its buildings' true extents
+  and a thread back to them, so the plan never quietly relocates a pile,
+  and the connectors keep running to the real position rather than to the
+  window. `findSpot`'s frontier multiplies by four per obstacle per round,
+  so it is cut back to the `SPOT_KEEP` nearest each time; unbounded, a plan
+  with no room left on it reaches the last round with a million candidates
+  and takes the tab down.
+- **A window's tag names every building in it, one per line, numbered to
+  match badges on the plan.** Joined into one strip the names ran off their
+  own end, which is the same as not naming them, and a window holding four
+  piles gave no way to tell which pile was which. The tag is part of the
+  box `layOut` places, so tags cannot collide either.
+- **`app.js` hands every view the same container and only empties it**, so
+  a window-level key handler cannot ask whether *that* is still in the
+  document — it always is. `listenForKeys` watches the `view-body` element
+  this render made instead. Getting it wrong looks like the map quietly
+  stepping levels while you read the Skills table.
+- **Ctrl-scroll has to be a non-passive listener that calls
+  `preventDefault`**, or the browser reads it as a page zoom and the fort
+  comes out twice the size. The deltas are accumulated (`WHEEL_STEP`)
+  because one mouse notch is 100-ish pixels and one trackpad flick is a
+  dozen events of three. `e`/`c` and `<`/`>` are the same step, and a level
+  change rebuilds the panel, so the scroll position is carried by hand in
+  `state.pan`.
+
 `web/js/db.js` owns all interpretation of the raw snapshot: indexes by id,
 per-unit derived fields (`best` skill per category, `topSkills`, `idleRate`,
 `label`), the link adjacency (`linksOf`), the skill categorisation, the
